@@ -1,0 +1,175 @@
+; =============================================================================
+; i2s_duplex.pio — I2S Master TX + RX for RP2350 + ES8311
+;
+; Two programs in this file:
+;   i2s_tx : TX master (BCLK + LRCK generated, DACDAT output)
+;   i2s_rx : RX slave  (ADCDAT input, synchronized with TX)
+;
+; I2S Philips format, 16 bits/channel, MSB-first, stereo.
+; One DMA word = one 32-bit stereo frame: [L:16][R:16]
+;
+; Pinout:
+;   TX out pin    = DACDAT  (GPIO 12)
+;   TX side bit 0 = BCLK    (GPIO 10)
+;   TX side bit 1 = LRCK    (GPIO 11  = BCLK+1, hardware constraint)
+;   RX in  pin    = ADCDAT  (GPIO 13)
+;   RX side bit 0 = (internal, not connected — timing only)
+;
+; TX/RX synchronization:
+;   Both SMs use the same clkdiv.
+;   TX (SM0) started first, RX (SM1) started immediately after.
+;   ⚠ Use pio_enable_sm_mask_in_sync() for a simultaneous start.
+; =============================================================================
+
+
+; =============================================================================
+; TX program — I2S Philips Master
+;
+; LRCK timing (critical!):
+;   LRCK must transition on the FALLING edge of BCLK for the LAST bit.
+;   Correct pattern: `out pins,1 side 0b10` (last L bit, BCLK↓ AND LRCK->1)
+;   WRONG pattern   : transition on the RISING edge -> ES8311 setup violation -> silence
+;
+; ⚠ DO NOT modify this timing without re-reading CLAUDE.md's "Pièges PIO" section.
+; =============================================================================
+
+.program i2s_tx
+.side_set 2
+
+;                              /─── LRCK (side bit 1)
+;                              |/── BCLK (side bit 0)
+.wrap_target
+
+; ── LEFT channel (LRCK=0): 16 bits, 32 SM cycles ───────────────────────────
+; Loop: x=14 -> 15 iterations + 1 bit outside the loop = 16 bits total
+; x is initialized by the `set x,14 side 0b01` at the end of the right channel
+bitloop_l:
+    out  pins, 1      side 0b00   ; present L bit, BCLK=0, LRCK=0
+    jmp  x-- bitloop_l side 0b01  ; BCLK=1 (ES8311 samples DI), loop if x!=0
+    out  pins, 1      side 0b10   ; last L bit: BCLK↓ AND LRCK->1 <- I2S Philips ✓
+    set  x, 14        side 0b11   ; BCLK=1 (last L sampled), LRCK stays 1
+
+; ── RIGHT channel (LRCK=1): 16 bits, 32 SM cycles ──────────────────────────
+bitloop_r:
+    out  pins, 1      side 0b10   ; present R bit, BCLK=0, LRCK=1
+    jmp  x-- bitloop_r side 0b11  ; BCLK=1 (ES8311 samples DI), loop if x!=0
+    out  pins, 1      side 0b00   ; last R bit: BCLK↓ AND LRCK->0 <- I2S Philips ✓
+    set  x, 14        side 0b01   ; BCLK=1 (last R sampled), LRCK stays 0
+
+.wrap  ; -> bitloop_l for the next frame
+
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+// Initializes the I2S TX SM.
+// pin_bclk: BCLK GPIO (side-set 0). pin_lrck must be pin_bclk+1 (side-set 1).
+// pin_dacdat: DACDAT GPIO (out).
+// clkdiv = sys_clk / (2 * sample_rate * bits * 2_chans)
+static inline void i2s_tx_program_init(PIO pio, uint sm, uint offset,
+                                        uint pin_dacdat, uint pin_bclk,
+                                        uint32_t sample_rate, uint8_t bits) {
+    pio_sm_config c = i2s_tx_program_get_default_config(offset);
+
+    pio_gpio_init(pio, pin_dacdat);
+    sm_config_set_out_pins(&c, pin_dacdat, 1);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_dacdat, 1, true);
+
+    pio_gpio_init(pio, pin_bclk);
+    pio_gpio_init(pio, pin_bclk + 1);   // LRCK = BCLK+1
+    sm_config_set_sideset_pins(&c, pin_bclk);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_bclk, 2, true);
+
+    // Shift LEFT = MSB-first. Autopull at 32 bits (1 stereo frame [L:16][R:16])
+    sm_config_set_out_shift(&c, false, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);  // 8-word TX FIFO
+
+    float clkdiv = (float)clock_get_hz(clk_sys) /
+                   (2.0f * (float)sample_rate * (float)bits * 2.0f);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+    // DO NOT enable the SM here — use pio_enable_sm_mask_in_sync() with RX
+}
+%}
+
+
+; =============================================================================
+; RX program — I2S Philips Slave (synchronized with TX)
+;
+; Timing:
+;   The ES8311 presents DO on the FALLING edge of BCLK (side=0 in TX).
+;   This program samples DO on the RISING edge of BCLK (side=1).
+;   Cycle-by-cycle alignment with TX:
+;     TX cycle 1  : out  side 0b00  (BCLK=0, ES8311 updates DO)
+;     RX cycle 1  : set  side 0b0   (BCLK=0, waiting)
+;     TX cycle 2  : jmp  side 0b01  (BCLK=1)
+;     RX cycle 2  : in   side 0b1   (BCLK=1, DO stable -> sampled here)
+;     ... and so on for each bit
+;
+; Push format: [L:16][R:16] in 32 bits (same as the TX format)
+;   ISR bit31 = L[15] (first bit read, left MSB)
+;   ISR bit0  = R[0]  (last bit read, right LSB)
+;
+; Total per frame: 64 SM cycles (= TX), one 32-bit autopush
+; =============================================================================
+
+.program i2s_rx
+.side_set 1
+; Note: the 1-bit side-set is used for timing only.
+; The side-set pin is NOT configured as an output in init — no GPIO conflict.
+
+.wrap_target
+    set x, 14       side 0b0   ; 1 cycle: x=14, BCLK=0 — left channel setup
+                                ; (wrap_target aligned with TX `bitloop_l`+setup)
+
+; ── LEFT channel: 15 iter x 2 cycles + 1 (last in) + 1 (set x for R) = 32 cycles
+lp_l:
+    in  pins, 1     side 0b1   ; BCLK=1: DO stable, samples L[15..1]
+    jmp x-- lp_l    side 0b0   ; BCLK=0: ES8311 updates DO, decrements x
+    in  pins, 1     side 0b1   ; BCLK=1: last bit L[0]
+    set x, 14       side 0b0   ; BCLK=0: right channel setup
+
+; ── RIGHT channel: 15 iter x 2 cycles + 1 (last in) = 31 cycles + wrap=1 = 32 cycles
+lp_r:
+    in  pins, 1     side 0b1   ; BCLK=1: DO stable, samples R[15..1]
+    jmp x-- lp_r    side 0b0   ; BCLK=0: ES8311 updates DO
+    in  pins, 1     side 0b1   ; BCLK=1: last bit R[0]
+
+.wrap  ; -> set x, 14 side 0b0 (start of the next frame)
+
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+// Initializes the I2S RX SM.
+// pin_adcdat: ADCDAT GPIO (in) = ES8311 DO.
+// sample_rate and bits must match TX for synchronization.
+// ⚠ Call AFTER i2s_tx_program_init(). Start both SMs with
+//   pio_enable_sm_mask_in_sync((1<<sm_tx)|(1<<sm_rx)) for a simultaneous start.
+static inline void i2s_rx_program_init(PIO pio, uint sm, uint offset,
+                                        uint pin_adcdat,
+                                        uint32_t sample_rate, uint8_t bits) {
+    pio_sm_config c = i2s_rx_program_get_default_config(offset);
+
+    // ADCDAT as input
+    pio_gpio_init(pio, pin_adcdat);
+    sm_config_set_in_pins(&c, pin_adcdat);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin_adcdat, 1, false);  // input
+
+    // The side-set (1 bit) is NOT connected to a GPIO — internal timing only
+    // (do not call sm_config_set_sideset_pins to avoid driving a GPIO)
+
+    // Shift LEFT = MSB-first. Autopush at 32 bits = 1 frame [L:16][R:16]
+    sm_config_set_in_shift(&c, false, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);  // 8-word RX FIFO
+
+    // Same clkdiv as TX to stay synchronized
+    float clkdiv = (float)clock_get_hz(clk_sys) /
+                   (2.0f * (float)sample_rate * (float)bits * 2.0f);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    pio_sm_init(pio, sm, offset, &c);
+    // DO NOT enable the SM here
+}
+%}

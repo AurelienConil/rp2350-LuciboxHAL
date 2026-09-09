@@ -1,0 +1,46 @@
+# Build (CMake / Ninja / Pico SDK)
+build/
+build-*/
+out/
+cmake-build-*/
+
+# CMake artifacts that can end up outside build/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+Makefile
+compile_commands.json
+Testing/
+
+# Pico SDK / picotool
+*.uf2
+*.elf
+*.bin
+*.hex
+*.map
+*.dis
+
+# VS Code — outils personnels, pas la config projet versionnée
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/c_cpp_properties.json
+!.vscode/cmake-kits.json
+.vscode/ipch/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Éditeurs / IDE divers
+*.swp
+*.swo
+*~
+.idea/
+
+# Logs
+*.log
