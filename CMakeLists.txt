@@ -33,15 +33,16 @@ project(rp2350-LuciboxHAL C CXX ASM)
 pico_sdk_init()
 
 # ── Sources ───────────────────────────────────────────────────────────────────
-# Template: a single instrument (SelfTest, HAL proof-of-life check).
-# To derive a project, replace instruments/selftest.cpp with your instrument.
+# Template: a single instrument (class Instrument, fixed name; the shipped
+# content is a HAL proof-of-life check). To derive a project, rewrite
+# instruments/instrument.hpp/.cpp — nothing else to change here.
 add_executable(rp2350-LuciboxHAL
     main.cpp
     hal/audio.c
     hal/es8311.c
     hal/controls.c
     hal/leds.c
-    instruments/selftest.cpp
+    instruments/instrument.cpp
 )
 
 # Generates i2s_duplex.pio.h from i2s_duplex.pio (TX + RX)

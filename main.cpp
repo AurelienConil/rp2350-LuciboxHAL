@@ -2,9 +2,9 @@
  * main.cpp — rp2350-LuciboxHAL
  *
  * Audio firmware for RP2350 + ES8311 — template.
- * Active instrument: SelfTest (DAC sweep + ADC passthrough, proof that the
+ * Active instrument: Instrument (DAC sweep + ADC passthrough, proof that the
  * full chain works). To derive a project from this template, replace
- * SelfTest with your own instrument (see CLAUDE.md).
+ * Instrument with your own instrument (see CLAUDE.md).
  *
  * Pinout:
  *   GPIO 6/7   : I2C1 SDA/SCL -> ES8311
@@ -39,9 +39,23 @@
 #include "hal/controls.h"
 #include "hal/leds.h"
 #include "instruments/audio_instrument.hpp"
-#include "instruments/selftest.hpp"
+#include "instruments/instrument.hpp"   
 
-static SelfTest g_instrument;
+static Instrument g_instrument;
+
+/* ── Control-side dispatch: controls -> instrument hooks (main loop only) ──────
+ * This is the single reader of button edges and encoder deltas. */
+static void dispatch_controls(AudioInstrument &inst) {
+    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS; i++) {
+        while (controls_button_pressed(i))  inst.on_button(i, true);
+        while (controls_button_released(i)) inst.on_button(i, false);
+    }
+    for (uint8_t i = 0; i < CONTROLS_NUM_ENCODERS; i++) {
+        int32_t d = controls_encoder_delta(i);
+        if (d != 0) inst.on_encoder(i, d);
+    }
+    inst.on_tick(to_ms_since_boot(get_absolute_time()));
+}
 
 /* ── C callback passed to the HAL — dispatches to the instrument ────────────── */
 extern "C" void audio_cb(const int16_t *rx, int16_t *tx, uint32_t n, void *ctx) {
@@ -107,11 +121,12 @@ int main() {
     printf("\n[OK] %s active — DMA + PIO free-running, CPU idle.\n\n",
            g_instrument.name());
 
-    /* Main loop: control-rate sensor scan (pots, buttons, MPR121), ~50 Hz.
-     * Never done from the audio IRQ — see hal/controls.h. */
+    /* Main loop: control rate (~50 Hz), never from the audio IRQ.
+     * scan sensors -> deliver events to the instrument hooks -> refresh LEDs. */
     while (true) {
         controls_update();
-        leds_show();   /* push the framebuffer written by process() */
+        dispatch_controls(g_instrument);
+        leds_show();   /* push the framebuffer written by the instrument */
         sleep_ms(CONTROLS_UPDATE_PERIOD_MS);
     }
 }

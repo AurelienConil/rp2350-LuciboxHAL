@@ -1,11 +1,11 @@
 # rp2350-LuciboxHAL
 
 Firmware audio pour RP2350 + ES8311 : HAL I2S duplex (DAC + ADC), contrôles
-par potentiomètres. **Template GitHub** — l'instrument par défaut (`SelfTest`)
+par potentiomètres. **Template GitHub** — l'instrument par défaut (`Instrument`, auto-test)
 est volontairement factice : sweep audio (preuve DAC) + passthrough ADC
 (preuve ADC), sans logique musicale. Sert de point de départ ("Use this
 template" sur GitHub) pour dériver un projet par instrument réel (synth,
-sampler, looper...), chacun remplaçant `SelfTest` par sa propre classe
+sampler, looper...), chacun réécrivant `Instrument` avec sa propre logique
 héritant de `AudioInstrument`. La HAL (`hal/`) ne bouge pas d'un projet
 dérivé à l'autre.
 
@@ -33,11 +33,12 @@ copier `build/rp2350-LuciboxHAL.uf2` sur le lecteur `RPI-RP2`.
 
 ---
 
-## Instrument par défaut — SelfTest
+## Instrument par défaut — `Instrument` (démo SelfTest)
 
-Un seul instrument dans ce template : `SelfTest` (`instruments/selftest.hpp/.cpp`).
-Aucun paramètre de sélection à la compilation (plus d'`APP_MODE`) — un seul
-`.cpp` d'instrument est listé dans `CMakeLists.txt`.
+Un seul instrument par firmware : la classe `Instrument`
+(`instruments/instrument.hpp/.cpp`). Nom de classe et de fichiers **fixes** :
+`main.cpp` et `CMakeLists.txt` n'ont jamais à changer. Le contenu fourni est un
+auto-test factice (ex-« SelfTest »).
 
 - Sortie DAC : sweep sinusoïdal 440↔470 Hz (LFO 0.1 Hz, LUT + accumulateur
   de phase) — preuve que le chemin DAC fonctionne, même en silence total en entrée.
@@ -50,13 +51,29 @@ Aucun paramètre de sélection à la compilation (plus d'`APP_MODE`) — un seul
 1. GitHub → "Use this template" → nouveau repo.
 2. Renommer le projet (`project(...)` et `add_executable(...)` dans
    `CMakeLists.txt`, nom du dossier).
-3. Remplacer `instruments/selftest.hpp/.cpp` par ton instrument : nouvelle
-   classe héritant de `AudioInstrument` (`init()`, `process()`, `name()`),
-   même contrat temps réel (voir `instruments/audio_instrument.hpp`).
-4. Mettre à jour la liste de sources dans `CMakeLists.txt` et l'inclusion/
-   instanciation dans `main.cpp`.
-5. La HAL (`hal/`) et `i2s_duplex.pio` ne changent en principe pas — ce sont
+3. Réécrire `instruments/instrument.hpp/.cpp` (seuls fichiers à modifier) :
+   garder le nom de classe `Instrument`, héritant de `AudioInstrument`
+   (`init()`, `process()`, `name()`, plus les hooks contrôle optionnels
+   `on_button()`, `on_encoder()`, `on_tick()`), voir
+   `instruments/audio_instrument.hpp`. Ajouter d'autres `.cpp` d'instrument
+   si besoin dans `CMakeLists.txt`.
+4. La HAL (`hal/`) et `i2s_duplex.pio` ne changent en principe pas — ce sont
    les fondations communes à tous les projets dérivés.
+
+### Deux contextes d'exécution par instrument
+
+| Contexte | Méthodes | Cadence | Règles |
+|----------|----------|---------|--------|
+| AUDIO (IRQ DMA) | `process()` | ~188 Hz | temps réel strict (voir plus bas) |
+| CONTROL (boucle `main()`) | `on_button()`, `on_encoder()`, `on_tick()` | ~50 Hz | printf/LEDs OK, pas d'IRQ ; main() appelle `leds_show()` ensuite |
+
+`main()` est l'**unique lecteur** des fronts de boutons et deltas d'encodeurs
+(`dispatch_controls()`) : `process()` ne doit plus appeler
+`controls_button_pressed/_released` ni `controls_encoder_delta`. Les données
+passent du contrôle vers l'audio via `std::atomic` (paramètres indépendants)
+ou une file SPSC lock-free — jamais de mutex. L'horloge musicale (pas, tempo)
+vit dans `process()` (compteur d'échantillons), pas dans `on_tick()` (jitter
+~20 ms).
 
 ---
 
@@ -96,7 +113,7 @@ tx_buf[] → DMA TX → PIO0 SM0 → DACDAT (GPIO12) → ES8311 DAC
 2. **ES8311 registres** — DAC + ADC, sans CSM_ON
 3. **Controls** — pots (ADC GPIO 40-47), boutons, LEDs, encodeurs (timer 1 kHz)
 4. **HAL audio** — PIO + DMA (non démarrés)
-5. **Instrument** — init() de l'instrument (`SelfTest` par défaut)
+5. **Instrument** — init() de l'instrument (`Instrument`)
 6. **MCLK** — PWM GPIO 14, activé après I2C
 7. **ES8311 CSM_ON** — REG 0x00 = 0x80, après MCLK
 8. **audio_hal_start()** — DMA + PIO activés simultanément
@@ -184,12 +201,14 @@ vraie conversion ADC, non filtrée, à chaque appel. À la place :
   lectures consécutives identiques (~40 ms par défaut à 50 Hz). Pull-up
   interne, appui = niveau bas — masqué par l'API (`controls_button_get()`
   renvoie `true` = appuyé, quel que soit le câblage).
-- API utilisable dans `process()` (toutes O(1), sans accès matériel) :
-  `controls_pot_get(ch)` (0..1 lissé), `controls_button_get(i)` (niveau),
-  `controls_button_pressed(i)` / `_released(i)` (front, consommé à la lecture),
-  `controls_encoder_delta(i)` (crans depuis le dernier appel, signé),
-  `controls_led_set(n, on)`. Fronts et deltas : **un seul lecteur** (le
-  `process()` de l'instrument) — l'état "déjà lu" est côté lecteur.
+- API (toutes O(1), sans accès matériel) : `controls_pot_get(ch)` (0..1 lissé)
+  et `controls_button_get(i)` (niveau) sont utilisables dans `process()` ;
+  `controls_button_pressed(i)` / `_released(i)` (front, consommé à la lecture)
+  et `controls_encoder_delta(i)` (crans depuis le dernier appel, signé) sont
+  lus **uniquement par `dispatch_controls()` dans `main()`**, qui les livre à
+  l'instrument via `on_button()` / `on_encoder()`. `controls_led_set(n, on)`
+  utilisable des deux côtés. Fronts et deltas : **un seul lecteur** — l'état
+  "déjà lu" est côté lecteur.
 
 ---
 
@@ -205,8 +224,9 @@ rp2350-LuciboxHAL/
 │   ├── es8311.h/.c                 # Driver codec ES8311 (DAC + ADC)
 │   └── controls.h/.c               # pots, boutons, LEDs, encodeurs + MPR121 stub
 └── instruments/
-    ├── audio_instrument.hpp        # Classe de base (pure virtual)
-    └── selftest.hpp/.cpp           # Instrument fake : sweep DAC + passthrough ADC
+    ├── audio_instrument.hpp        # Classe de base : process() audio + hooks contrôle
+    └── instrument.hpp/.cpp         # Instrument (à réécrire) ; fourni = fake : sweep DAC + passthrough ADC
+                                    # + démo hooks (encodeur 0 = pitch, boutons, LED)
 ```
 
 ---

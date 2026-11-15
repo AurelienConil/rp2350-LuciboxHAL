@@ -1,16 +1,18 @@
 /*
- * instruments/selftest.cpp — Fake instrument, proof-of-life check
+ * instruments/instrument.cpp — Fake instrument, proof-of-life check
  *
  * >>> THIS is the file to edit when deriving your own firmware from this
- *     template. See selftest.hpp and CLAUDE.md. <<<
+ *     template. See instrument.hpp and CLAUDE.md. <<<
  */
 
-#include "selftest.hpp"
+#include "instrument.hpp"
 #include "../hal/audio.h"
+#include "../hal/controls.h"
+#include "../hal/leds.h"
 #include <cmath>
 #include <cstdio>
 
-void SelfTest::init() {
+void Instrument::init() {
     /* Precompute normalized sine LUT (amplitude = 1.0 -> int16 range = ±32767) */
     for (int i = 0; i < LUT_SIZE; i++) {
         lut_[i] = (int16_t)(32767.0f * sinf(2.0f * 3.14159265f * i / LUT_SIZE));
@@ -25,21 +27,48 @@ void SelfTest::init() {
                       * ((float)AUDIO_BUFFER_FRAMES / (float)AUDIO_SAMPLE_RATE);
     sweep_phase_ = 0.0f;
 
-    printf("[SelfTest] LUT %d entries, sweep %.0f<->%.0f Hz @ %.1f Hz + ADC passthrough\n",
+    printf("[Instrument] LUT %d entries, sweep %.0f<->%.0f Hz @ %.1f Hz + ADC passthrough\n",
            LUT_SIZE, SWEEP_FREQ_LOW_HZ, SWEEP_FREQ_HIGH_HZ, SWEEP_RATE_HZ);
 }
 
 /* Advances the frequency LFO and recomputes phase_inc_. Called once per buffer. */
-void SelfTest::update_sweep_() {
+void Instrument::update_sweep_() {
     sweep_phase_ += sweep_phase_inc_;
     if (sweep_phase_ > 2.0f * 3.14159265f)
         sweep_phase_ -= 2.0f * 3.14159265f;
 
-    float freq = SWEEP_CENTER_HZ - SWEEP_AMPLITUDE_HZ * cosf(sweep_phase_);
+    float offset = (float)pitch_offset_hz_.load(std::memory_order_relaxed);
+    float freq = SWEEP_CENTER_HZ + offset - SWEEP_AMPLITUDE_HZ * cosf(sweep_phase_);
+    if (freq < 20.0f) freq = 20.0f;   /* keep the increment positive */
     phase_inc_ = (uint32_t)(freq / AUDIO_SAMPLE_RATE * 4294967296.0f);
 }
 
-void SelfTest::process(const int16_t *rx, int16_t *tx, uint32_t n_frames) {
+/* ── CONTROL side (main loop, ~50 Hz) ─────────────────────────────────────── */
+
+void Instrument::on_button(uint8_t idx, bool pressed) {
+    printf("[Instrument] button %u %s\n", idx, pressed ? "pressed" : "released");
+
+    /* Lit buttons (indices 6..9): toggle their LED on press. */
+    if (pressed && idx >= CONTROLS_BTN_LIT(0) && idx < CONTROLS_NUM_BUTTONS) {
+        uint8_t led = idx - CONTROLS_BTN_LIT(0);
+        controls_led_set(led, !controls_led_get(led));
+    }
+}
+
+void Instrument::on_encoder(uint8_t idx, int32_t delta) {
+    if (idx != 0) return;
+    int32_t off = pitch_offset_hz_.load(std::memory_order_relaxed) + delta * PITCH_STEP_HZ;
+    pitch_offset_hz_.store(off, std::memory_order_relaxed);   /* single writer */
+    printf("[Instrument] pitch offset %+d Hz\n", (int)off);
+}
+
+void Instrument::on_tick(uint32_t now_ms) {
+    /* Heartbeat: strip LED 0 blinks at 1 Hz (dim green). */
+    bool on = ((now_ms / 500) & 1) != 0;
+    leds_set(0, 0, on ? 255 : 0, 0);
+}
+
+void Instrument::process(const int16_t *rx, int16_t *tx, uint32_t n_frames) {
     update_sweep_();   /* advance the LFO once per buffer */
 
     for (uint32_t i = 0; i < n_frames; i++) {

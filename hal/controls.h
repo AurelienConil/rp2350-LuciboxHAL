@@ -10,11 +10,14 @@
  * (The WS2812 strip is an output, not a control: it is not handled here.)
  *
  * ── Rules ───────────────────────────────────────────────────────────────────
- * The audio side (process()) ONLY calls the *_get / *_pressed / *_released /
- * *_delta functions below. All of them are O(1), lock-free, never touch the
- * hardware (except controls_led_set, a single atomic GPIO write), and are safe
- * from the audio IRQ. Never call controls_pot_read_raw()/_norm() from
- * process(): unfiltered, triggers a real ADC conversion.
+ * Instruments do not poll edges/deltas themselves: main() reads
+ * controls_button_pressed/_released and controls_encoder_delta once per control
+ * tick and delivers them to AudioInstrument::on_button()/on_encoder().
+ * process() (audio IRQ) only uses the level getters (controls_pot_get,
+ * controls_button_get). All functions below are O(1), lock-free, never touch the
+ * hardware (except controls_led_set, a single atomic GPIO write). Never call
+ * controls_pot_read_raw()/_norm() from process(): unfiltered, triggers a real
+ * ADC conversion.
  *
  * Scanning is decoupled from the audio IRQ:
  *   - controls_update()   : main() loop, every CONTROLS_UPDATE_PERIOD_MS
@@ -25,7 +28,8 @@
  *
  * ── Single-consumer assumption ──────────────────────────────────────────────
  * Edge events and encoder deltas are "consume on read" with state kept on the
- * reader side: exactly ONE context (the instrument's process()) must read them.
+ * reader side: exactly ONE context (main()'s dispatch to the instrument hooks)
+ * must read them.
  * Level getters (controls_pot_get, controls_button_get) have no such limit.
  */
 

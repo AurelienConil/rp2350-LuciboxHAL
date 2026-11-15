@@ -1,32 +1,48 @@
 /*
- * instruments/selftest.hpp — Fake instrument, proof-of-life check
+ * instruments/instrument.hpp — Fake instrument, proof-of-life check
  *
  * >>> THIS is the file to edit when deriving your own firmware from this
- *     template. Replace SelfTest with your own instrument (new class
- *     inheriting from AudioInstrument), update main.cpp and CMakeLists.txt
- *     accordingly. See CLAUDE.md for the step-by-step procedure. <<<
+ *     template. Rewrite this class (keep the name `Instrument` and the file
+ *     names: main.cpp and CMakeLists.txt then need no change).
+ *     See CLAUDE.md for the step-by-step procedure. <<<
  *
  * No musical logic here — just enough to physically verify the whole HAL
- * chain works on both sides:
+ * chain works on all sides:
+ *   AUDIO   (process)
  *   - DAC : 440<->470 Hz sweep (0.1 Hz LFO) — listen on headphones/speaker
  *   - ADC : passthrough of the captured signal (mic/line), mixed with the sweep
+ *   CONTROL (on_button / on_encoder / on_tick)
+ *   - encoder 0 : shifts the sweep pitch by ±5 Hz per detent (control -> audio
+ *                 crossing through a std::atomic)
+ *   - any button: prints the event; lit buttons toggle their LED
+ *   - on_tick   : heartbeat on strip LED 0 (proves the control loop runs)
  *
  * Silence on input -> you only hear the sweep (proves the DAC path).
  * Signal on input (voice, line) -> it adds to the sweep (proves the ADC path).
+ * Nothing touched -> exactly the original sweep + passthrough.
  */
 
 #pragma once
 
 #include "audio_instrument.hpp"
+#include <atomic>
 #include <cstdint>
 
-class SelfTest : public AudioInstrument {
+class Instrument : public AudioInstrument {
 public:
     void init() override;
     void process(const int16_t *rx, int16_t *tx, uint32_t n_frames) override;
-    const char *name() const override { return "SelfTest"; }
+    void on_button(uint8_t idx, bool pressed) override;
+    void on_encoder(uint8_t idx, int32_t delta) override;
+    void on_tick(uint32_t now_ms) override;
+    const char *name() const override { return "Instrument (selftest)"; }
 
 private:
+    /* Control -> audio: pitch offset in Hz, written by on_encoder(), read once
+     * per buffer by process(). Atomic 32-bit = lock-free on Cortex-M33. */
+    static constexpr int32_t PITCH_STEP_HZ = 5;
+    std::atomic<int32_t> pitch_offset_hz_{0};
+
     static constexpr int     LUT_SIZE = 256;
 
     /* DAC proof sweep — 440..470 Hz swing at 0.1 Hz */
