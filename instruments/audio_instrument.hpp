@@ -10,7 +10,13 @@
  *   - Duration < 5 ms (256-sample buffer size @ 48 kHz)
  *   - No dynamic memory allocation
  *   - No printf(), sleep(), or blocking mutex
- *   - Reading controls (pots, MPR121): OK read-only from the IRQ
+ *   - Controls (hal/controls.h): only the cached O(1) calls —
+ *       controls_pot_get(ch)            0..1 smoothed, ch 0..7
+ *       controls_button_get(i)          level;  _pressed(i) / _released(i) edge events
+ *       controls_encoder_delta(i)       detents since last call (signed)
+ *       controls_led_set(n, on)         lit-button LEDs
+ *     Poll them once per process() call. Never controls_pot_read_*().
+ *     Edges/deltas are consume-on-read: only process() may read them.
  *
  * int16_t[n_frames] buffer format — MONO:
  *   buf[i] = one sample. The ES8311 is a mono codec; the HAL already

@@ -22,7 +22,9 @@ if (EXISTS ${picoVscode})
 endif()
 # ====================================================================================
 
-set(PICO_BOARD pico2 CACHE STRING "Board type")
+# Custom RP2350B board (GPIO 32-47 needed) — see boards/lucibox.h
+set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards)
+set(PICO_BOARD lucibox CACHE STRING "Board type")
 
 include(pico_sdk_import.cmake)
 
@@ -38,12 +40,18 @@ add_executable(rp2350-LuciboxHAL
     hal/audio.c
     hal/es8311.c
     hal/controls.c
+    hal/leds.c
     instruments/selftest.cpp
 )
 
 # Generates i2s_duplex.pio.h from i2s_duplex.pio (TX + RX)
 pico_generate_pio_header(rp2350-LuciboxHAL
     ${CMAKE_CURRENT_SOURCE_DIR}/i2s_duplex.pio
+)
+
+# Generates ws2812.pio.h (WS2812 strip, PIO1)
+pico_generate_pio_header(rp2350-LuciboxHAL
+    ${CMAKE_CURRENT_SOURCE_DIR}/ws2812.pio
 )
 
 # Firmware name and version

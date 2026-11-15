@@ -12,7 +12,12 @@
  *   GPIO 12    : DACDAT I2S TX
  *   GPIO 13    : ADCDAT I2S RX
  *   GPIO 14    : MCLK PWM (12.5 MHz)
- *   GPIO 26-29 : internal ADC -> potentiometers
+ *   GPIO 18-25 : 4 quadrature encoders (A,B pairs)
+ *   GPIO 26-31 : 6 simple buttons (pull-up, active-low)
+ *   GPIO 32-39 : 4 lit buttons (switch 32/34/36/38, LED 33/35/37/39)
+ *   GPIO 1     : WS2812 data (16 LEDs, PIO1)
+ *   GPIO 40-47 : internal ADC -> 8 potentiometers (RP2350B)
+ *   (full details: hal/controls.h)
  *
  * Init order (hardware constraints):
  *   1. I2C   : before MCLK (PWM EMI disturbs I2C)
@@ -32,6 +37,7 @@
 #include "hal/audio.h"
 #include "hal/es8311.h"
 #include "hal/controls.h"
+#include "hal/leds.h"
 #include "instruments/audio_instrument.hpp"
 #include "instruments/selftest.hpp"
 
@@ -78,6 +84,7 @@ int main() {
     /* ── 3. Controls ──────────────────────────────────────────────────── */
     printf("[INIT 3/7] Controls (internal ADC pots)...\n");
     controls_init();
+    leds_init();   /* WS2812 strip, GPIO 1, PIO1 */
 
     /* ── 4. HAL audio (PIO + DMA) ─────────────────────────────────────── */
     printf("[INIT 4/7] Audio HAL (PIO I2S duplex + DMA double-buffer)...\n");
@@ -100,10 +107,11 @@ int main() {
     printf("\n[OK] %s active — DMA + PIO free-running, CPU idle.\n\n",
            g_instrument.name());
 
-    /* Main loop: non-real-time control updates */
+    /* Main loop: control-rate sensor scan (pots, buttons, MPR121), ~50 Hz.
+     * Never done from the audio IRQ — see hal/controls.h. */
     while (true) {
-        /* MPR121: polled from the main loop (not from the IRQ — I2C is blocking) */
-        controls_mpr121_update();
-        sleep_ms(10);  /* 100 Hz touch refresh rate */
+        controls_update();
+        leds_show();   /* push the framebuffer written by process() */
+        sleep_ms(CONTROLS_UPDATE_PERIOD_MS);
     }
 }

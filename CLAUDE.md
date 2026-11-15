@@ -71,7 +71,12 @@ Aucun paramètre de sélection à la compilation (plus d'`APP_MODE`) — un seul
 | 12 | DACDAT | I2S TX : RP2350 → ES8311 DI |
 | 13 | ADCDAT | I2S RX : ES8311 DO → RP2350 |
 | 14 | MCLK | PWM 12.5 MHz (150 MHz / 12) |
-| 26-29 | Pot 0-3 | ADC interne ch0-3 → non utilisés par `SelfTest`, réservés aux instruments dérivés |
+| 18-25 | Encodeur 0-3 | 4 encodeurs quadrature (A,B par paire : 18/19, 20/21, 22/23, 24/25), sans push — décodés par timer 1 kHz |
+| 26-31 | Bouton simple 0-5 | GPIO direct, pull-up, actif bas (hypothèse : D26..D31 contigus) |
+| 32/34/36/38 | Bouton lumineux 0-3 | switch (indices boutons 6-9), pull-up, actif bas |
+| 33/35/37/39 | LED bouton lumineux 0-3 | sortie, `controls_led_set(n, on)` |
+| 40-47 | Pot 0-7 (A0-A7) | ADC interne ch0-7 — **RP2350B uniquement** (voir §Pièges : board) |
+| 1 | WS2812 data (16 LED) | PIO1, `hal/leds.h` : `leds_set()` (framebuffer, OK depuis `process()`), `leds_show()` appelé par `main()` |
 
 ---
 
@@ -89,7 +94,7 @@ tx_buf[] → DMA TX → PIO0 SM0 → DACDAT (GPIO12) → ES8311 DAC
 
 1. **I2C** — avant MCLK (ordre conservé par précaution ; la cause "EMI" n'est qu'une hypothèse non testée — voir §Pièges connus)
 2. **ES8311 registres** — DAC + ADC, sans CSM_ON
-3. **Controls** — ADC pots (GPIO 26-29)
+3. **Controls** — pots (ADC GPIO 40-47), boutons, LEDs, encodeurs (timer 1 kHz)
 4. **HAL audio** — PIO + DMA (non démarrés)
 5. **Instrument** — init() de l'instrument (`SelfTest` par défaut)
 6. **MCLK** — PWM GPIO 14, activé après I2C
@@ -136,10 +141,11 @@ diffère (ex. signal mono câblé uniquement côté R).
 `dma_irq_handler()` (`hal/audio.c`) est marqué `__not_in_flash_func()` : il tourne
 depuis la SRAM, pas depuis le cache flash XIP — élimine tout risque de latence
 variable due à un cache miss dans le chemin le plus critique du système (appelé
-~188 fois/s, budget ~5,3 ms). `controls_update()` et les lectures ADC brutes
-qu'elle appelle (`controls_pot_read_raw`/`_norm`, dans `hal/controls.c`) sont
-marquées pareil, car elles sont désormais invoquées à chaque bloc **depuis
-`dma_irq_handler()`** — donc sur le même chemin chaud (voir ci-dessous).
+~188 fois/s, budget ~5,3 ms). `controls_update()` et les lectures capteurs
+qu'elle appelle (`hal/controls.c`) ne sont **plus** sur ce chemin chaud — elles
+tournent depuis la boucle `main()`, à ~50 Hz, totalement découplées du rythme
+audio (voir §"Lecture des capteurs" ci-dessous) — donc pas besoin de
+`__not_in_flash_func` dessus.
 
 `CMakeLists.txt` active `-Wdouble-promotion -fno-math-errno
 -fsingle-precision-constant` sur toute la cible :
@@ -152,20 +158,38 @@ marquées pareil, car elles sont désormais invoquées à chaque bloc **depuis
 - `-fsingle-precision-constant` fait que les littéraux non suffixés restent en
   `float`, jamais promus en `double` par défaut.
 
-### Lecture des potentiomètres (control rate mécanique)
+### Lecture des capteurs (control rate, hors IRQ audio)
+
+Pots, boutons et (à terme) capteurs capacitifs I2C sont scannés depuis une
+**seule tâche dans la boucle `main()`**, à `CONTROLS_UPDATE_PERIOD_MS` (~50 Hz,
+`hal/controls.h`) — **jamais** depuis l'IRQ audio. C'est ce découplage qui rend
+sûr d'y inclure demain de l'I2C bloquant (MPR121) à côté des pots : l'IRQ audio
+ne touche plus jamais un capteur, quel qu'il soit.
 
 Les instruments ne doivent **jamais** appeler `controls_pot_read_raw()` /
 `controls_pot_read_norm()` depuis `process()` — ces fonctions déclenchent une
 vraie conversion ADC, non filtrée, à chaque appel. À la place :
 
-- `controls_update()` lit les `CONTROLS_NUM_POTS` canaux et applique un lissage
-  un pôle (`CONTROLS_POT_SMOOTH_COEFF`, ~16 ms de constante de temps). Appelée
-  **automatiquement une fois par bloc** par `dma_irq_handler()`, avant
-  `instrument.process()` — ce n'est plus une convention à respecter, c'est
-  mécanique : l'instrument n'a plus la main sur le moment où l'ADC est lu.
-- `controls_pot_get(ch)` renvoie la valeur mise en cache/lissée, 0.0..1.0, en
-  O(1), sans accès ADC. C'est la **seule** fonction à utiliser dans
-  `process()`.
+- `controls_update()` scanne pots (`CONTROLS_NUM_POTS = 8`), boutons
+  (`CONTROLS_NUM_BUTTONS = 10` : 6 simples + 4 lumineux, indices
+  `CONTROLS_BTN_SIMPLE(n)` / `CONTROLS_BTN_LIT(n)`) et MPR121. Appelée
+  **automatiquement à chaque tick de `main()`**, jamais par l'instrument.
+  Brochage : tables en tête de `hal/controls.c`.
+- Encodeurs (4) : décodés par un timer répétitif 1 kHz (un scan 50 Hz perdrait
+  des pas), pas par `controls_update()`.
+- Pots : lissage un pôle, constante de temps calculée à l'init depuis
+  `CONTROLS_POT_SMOOTH_TIME_MS` (pas un coefficient magique — reste correct si
+  `CONTROLS_UPDATE_PERIOD_MS` change).
+- Boutons : anti-rebond par confirmation sur `CONTROLS_BUTTON_DEBOUNCE_SAMPLES`
+  lectures consécutives identiques (~40 ms par défaut à 50 Hz). Pull-up
+  interne, appui = niveau bas — masqué par l'API (`controls_button_get()`
+  renvoie `true` = appuyé, quel que soit le câblage).
+- API utilisable dans `process()` (toutes O(1), sans accès matériel) :
+  `controls_pot_get(ch)` (0..1 lissé), `controls_button_get(i)` (niveau),
+  `controls_button_pressed(i)` / `_released(i)` (front, consommé à la lecture),
+  `controls_encoder_delta(i)` (crans depuis le dernier appel, signé),
+  `controls_led_set(n, on)`. Fronts et deltas : **un seul lecteur** (le
+  `process()` de l'instrument) — l'état "déjà lu" est côté lecteur.
 
 ---
 
@@ -179,7 +203,7 @@ rp2350-LuciboxHAL/
 ├── hal/
 │   ├── audio.h/.c                  # MCLK PWM, PIO I2S duplex, DMA double-buffer
 │   ├── es8311.h/.c                 # Driver codec ES8311 (DAC + ADC)
-│   └── controls.h/.c               # ADC pots + MPR121 stub
+│   └── controls.h/.c               # pots, boutons, LEDs, encodeurs + MPR121 stub
 └── instruments/
     ├── audio_instrument.hpp        # Classe de base (pure virtual)
     └── selftest.hpp/.cpp           # Instrument fake : sweep DAC + passthrough ADC
@@ -218,6 +242,13 @@ LRCK doit transiter sur le flanc **DESCENDANT** de BCLK — instruction `out pin
 (dernier bit L) et `out pins,1 side 0b00` (dernier bit R).
 Transiter sur le flanc MONTANT = violation setup ES8311 = **silence total**.
 **Ne pas modifier ce timing sans relire ce document.**
+
+### Board RP2350B (GPIO > 31)
+Le PCB utilise les GPIO 32-47 : la cible est un **RP2350B** (80 broches).
+`CMakeLists.txt` utilise la board custom `boards/lucibox.h` (`PICO_RP2350A 0`)
+au lieu de `pico2`. ⚠ `PICO_FLASH_SIZE_BYTES` y est copié de pico2 (4 Mo) — à
+régler sur la flash réelle. Après ce changement, **reconfigurer CMake**
+(supprimer `build/` ou "CMake: Delete Cache and Reconfigure").
 
 ### ABI float
 Ne **JAMAIS** ajouter `-mfloat-abi=hard` ni `-mfpu=...` dans `target_compile_options`.

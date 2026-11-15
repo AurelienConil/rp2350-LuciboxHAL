@@ -54,7 +54,7 @@ l'init puis dort dans une boucle de polling basse fréquence.
 |---|---|---|
 | RP2350 (Pico 2) | MCU, génère MCLK, PIO I2S, DMA, ADC pots | — |
 | ES8311 | Codec audio mono : 1 DAC (sortie), 1 ADC (entrée ligne) | I2C1 (config) + I2S (data) |
-| 4× potentiomètres | Contrôles temps réel | ADC interne RP2350 (GPIO 26-29) |
+| 8× potentiomètres, 10 boutons (4 lumineux), 4 encodeurs | Contrôles temps réel | ADC interne (GPIO 40-47), GPIO 18-39 |
 | MPR121 (prévu, stub) | Pavé tactile 12 touches | I2C1 (partagé avec ES8311) |
 
 Le brochage complet est dans `CLAUDE.md` — pas dupliqué ici, il ne change
@@ -67,9 +67,6 @@ un miroir exact des fichiers `.h`.
                     ┌──────────────────────────────────────────────┐
                     │                   RP2350                      │
                     │                                                │
-   pots (GPIO26-29) │  ADC interne ──► controls_update() (cache)   │
-                    │                         │                      │
-                    │                         ▼                      │
                     │                 AudioInstrument::process()     │
                     │                    ▲              │            │
    ES8311 ADC ──────┼── PIO0 SM1(RX) ────┘              └──► PIO0 SM0(TX) ──── ES8311 DAC
@@ -77,12 +74,18 @@ un miroir exact des fichiers `.h`.
                     │        │  DMA RX (ch1)      DMA TX (ch0)    │
                     │        └──────── rx_buf[] ──────► tx_buf[] ─┘
                     │                       (IRQ DMA_IRQ_0)
+                    │                                                │
+   pots/boutons ────┼──► controls_update() (cache) ──────────────────┤
+   (main(), ~50 Hz) │        ▲ lu en O(1) par process() via           │
+                    │        controls_pot_get()/controls_button_get() │
                     └──────────────────────────────────────────────┘
 ```
 
 Le pipeline audio est **entièrement matériel entre les buffers RAM et les
 broches** (PIO + DMA), le CPU n'intervenant que dans la callback `process()`
-appelée toutes les ~5,3 ms. Voir §2 pour le détail.
+appelée toutes les ~5,3 ms. Voir §2 pour le détail. Les capteurs (pots,
+boutons, tactile I2C) sont scannés **indépendamment**, depuis la boucle
+`main()` à ~50 Hz, jamais depuis cette IRQ — voir §4.
 
 ### 1.4 Organisation du code
 
@@ -94,7 +97,7 @@ rp2350-LuciboxHAL/
 ├── hal/
 │   ├── audio.h/.c              MCLK PWM, PIO I2S, DMA double-buffer, dispatch callback
 │   ├── es8311.h/.c             driver registres ES8311 (I2C)
-│   └── controls.h/.c           ADC pots + stub MPR121
+│   └── controls.h/.c           pots, boutons, LEDs, encodeurs (timer 1 kHz) + stub MPR121
 └── instruments/
     ├── audio_instrument.hpp    interface abstraite (contrat commun)
     └── selftest.hpp/.cpp       instrument fake : sweep DAC + passthrough ADC
@@ -209,18 +212,22 @@ Séquence dans `dma_irq_handler()` (`hal/audio.c`) :
 3. relance TX sur `tx_buf[active_buf]` — **ce buffer a été rempli par
    l'appel de callback précédent**, pas par celui qu'on va faire maintenant ;
 4. relance RX sur `rx_buf[active_buf]` ;
-5. `controls_update()` — lit et lisse les 4 pots (control rate, une fois par
-   bloc, voir §4.2) ;
-6. convertit `rx_buf[just_done]` (trame stéréo I2S) en `mono_rx_buf` (§5.1) ;
-7. appelle `g_process_fn(mono_rx_buf, mono_tx_buf, ...)` ;
-8. convertit `mono_tx_buf` en `tx_buf[just_done]` (trame stéréo I2S).
+5. convertit `rx_buf[just_done]` (trame stéréo I2S) en `mono_rx_buf` (§5.1) ;
+6. appelle `g_process_fn(mono_rx_buf, mono_tx_buf, ...)` ;
+7. convertit `mono_tx_buf` en `tx_buf[just_done]` (trame stéréo I2S).
+
+Aucun capteur n'est lu ici. C'était le cas des pots dans une version
+antérieure (`controls_update()` était appelée à chaque IRQ) — ça a été
+délibérément retiré : la lecture de capteurs (ADC ou future I2C bloquante)
+n'a rien à faire dans le chemin le plus critique du système, et son rythme
+(50 Hz, cf. §4) n'a aucun rapport avec celui de l'audio (188 Hz). Voir §4
+pour où ça vit maintenant.
 
 `dma_irq_handler()` est marqué `__not_in_flash_func()` — il tourne en SRAM, pas
-depuis le cache flash XIP. `controls_update()` et les lectures ADC qu'elle
-déclenche (`controls_pot_read_raw`/`_norm()`) le sont aussi, puisqu'elles sont
-désormais sur le même chemin chaud (appelées à chaque IRQ, étape 5). Objectif :
-éliminer toute latence variable due à un cache miss flash dans le handler le
-plus critique du système.
+depuis le cache flash XIP. Objectif : éliminer toute latence variable due à un
+cache miss flash dans le handler le plus critique du système. `controls_update()`
+et les lectures ADC/GPIO qu'elle déclenche ne sont **pas** marquées ainsi : elles
+ne sont plus sur ce chemin chaud (voir §4).
 
 Le point clé à comprendre pour ne pas se tromper en modifiant ce code :
 **au moment où la callback s'exécute, le hardware travaille déjà sur
@@ -351,60 +358,91 @@ commentaires inline de `es8311.c`.
 
 ## 4. Les contrôles (`controls.h/.c`)
 
-### 4.1 Potentiomètres
+### 4.1 Architecture générale — un seul scan, hors IRQ audio, ~50 Hz
 
-4 canaux ADC internes RP2350 (GPIO 26-29 → canaux 0-3), 12 bits. Deux couches
-d'API, volontairement asymétriques :
+Pots, boutons et (à terme) tactile capacitif I2C sont tous scannés par une
+**unique fonction**, `controls_update()`, appelée depuis la boucle `main()`
+toutes les `CONTROLS_UPDATE_PERIOD_MS` (20 ms, soit 50 Hz — `controls.h`,
+constante partagée entre `main.cpp` et `controls.c` pour ne pas dupliquer le
+rythme). Ce n'était pas le cas à l'origine : les pots étaient lus **depuis
+l'IRQ DMA**, à chaque bloc (~188 Hz) — bien plus vite que nécessaire pour un
+geste humain, et ça mettait des conversions ADC dans le chemin le plus
+critique du système. C'est ce qui a été corrigé : l'IRQ audio ne touche
+**plus jamais** un capteur, quel qu'il soit — voir §2.4.
+
+Ce découplage est ce qui permettra d'ajouter l'I2C bloquant (MPR121, §4.4)
+au même scan que les pots sans risque : une transaction I2C dans l'IRQ ferait
+exploser le budget de 5,3 ms, mais dans la boucle `main()` à 50 Hz elle a 20 ms
+de marge.
+
+### 4.2 Contrôles du PCB — pots, boutons, LEDs, encodeurs
+
+Brochage (tables en tête de `hal/controls.c`, détail dans `hal/controls.h`) :
+
+| Contrôle | Nb | GPIO |
+|----------|----|------|
+| Pots A0-A7 | 8 | 40-47 (ADC ch0-7, RP2350B) |
+| Boutons simples | 6 | 26-31 (hypothèse : contigus) |
+| Boutons lumineux (switch / LED) | 4 | 32/33, 34/35, 36/37, 38/39 |
+| Encodeurs (A,B, sans push) | 4 | 18/19, 20/21, 22/23, 24/25 |
+
+Les boutons partagent un seul espace d'indices 0-9 (0-5 simples,
+`CONTROLS_BTN_LIT(n)` = 6+n pour les lumineux).
+
+**Scan.** Pots + boutons + MPR121 : `controls_update()` depuis la boucle
+`main()` à 50 Hz. Encodeurs : timer répétitif 1 kHz (un scan à 50 Hz perdrait
+des pas en rotation rapide), table de transitions quadrature,
+`CONTROLS_ENCODER_STEPS_PER_DETENT` (4 par défaut) transitions par cran.
+
+**API côté audio** (tout est O(1), sans accès matériel, utilisable dans `process()`) :
 
 ```c
-// Bas niveau — déclenchent une VRAIE conversion ADC, non filtrée.
-// Réservées à l'init/calibration/main loop. JAMAIS depuis process().
-uint16_t controls_pot_read_raw(uint8_t ch);   // 0..4095
-float    controls_pot_read_norm(uint8_t ch);  // 0.0..1.0
-
-// Haut niveau — seule API autorisée depuis process().
-void  controls_update(void);          // lit + lisse les 4 canaux (appelée par la HAL)
-float controls_pot_get(uint8_t ch);   // lecture O(1) du cache lissé, 0.0..1.0
+float   controls_pot_get(uint8_t ch);            // 0..1, lissé (~15 ms)
+bool    controls_button_get(uint8_t i);          // niveau débounced, true = appuyé
+bool    controls_button_pressed(uint8_t i);      // front montant, une fois par appui
+bool    controls_button_released(uint8_t i);     // front descendant
+int32_t controls_encoder_delta(uint8_t i);       // crans depuis le dernier appel, signé
+void    controls_led_set(uint8_t n, bool on);    // LED du bouton lumineux n
 ```
 
-`controls_update()` applique un filtre un pôle (`y += 0.3 * (x - y)`,
-`CONTROLS_POT_SMOOTH_COEFF` dans `controls.c`) — constante de temps ≈ 16 ms au
-rythme de bloc par défaut (256 frames/48 kHz). Ça élimine le bruit de
-quantification ADC (quelques LSB de gigue) sans rendre le pot perceptiblement
-mou. `controls_init()` amorce le cache par une lecture directe, pour que
-`controls_pot_get()` ne renvoie jamais 0.0f avant le premier bloc audio.
+Exemple dans un instrument :
+```cpp
+void process(const int16_t *rx, int16_t *tx, uint32_t n) {
+    float vol = controls_pot_get(0);
+    cutoff_ += controls_encoder_delta(0) * 50.0f;
+    if (controls_button_pressed(CONTROLS_BTN_LIT(0))) {
+        rec_ = !rec_;  controls_led_set(0, rec_);
+    }
+    ...
+}
+```
 
-### 4.2 Contrainte de fréquence de lecture — mécanique, plus seulement documentée
+**Concurrence.** Chaque variable partagée n'a qu'un écrivain : le scan écrit
+niveaux et compteurs d'événements (`press_count`...), le lecteur écrit ses
+compteurs "déjà vus" — donc pas de lecture-modification-écriture partagée
+entre main et IRQ audio. Conséquence : fronts et deltas sont
+**consommés à la lecture, par un seul lecteur** (le `process()`).
 
-Avant, le commentaire d'en-tête demandait de lire les pots "une fois par
-buffer, pas par sample" — une discipline documentée, mais qu'un instrument
-pouvait violer sans que rien ne le signale. Ce n'est plus le cas :
-`controls_update()` est appelée **automatiquement** par `dma_irq_handler()`
-(`hal/audio.c`, avant `g_process_fn`, voir §2.4) — l'instrument n'a plus la
-main sur le déclenchement de la conversion ADC, il ne fait plus que lire un
-cache via `controls_pot_get()`. Appeler `controls_pot_read_raw()`/`_norm()`
-depuis `process()` reste possible syntaxiquement (rien ne l'empêche au niveau
-du système de types) mais casse la discipline control-rate et réintroduit le
-bruit ADC brut dans le signal de contrôle — documenté comme piège dans
-`controls.h`, à éviter dans tout instrument dérivé.
+Lissage pots : filtre un pôle, coefficient calculé à l'init depuis
+`CONTROLS_POT_SMOOTH_TIME_MS`. Boutons : anti-rebond sur
+`CONTROLS_BUTTON_DEBOUNCE_SAMPLES` lectures identiques (~40 ms). Polarité
+(pull-up, actif bas) masquée par l'API. Ne jamais appeler
+`controls_pot_read_raw()`/`_norm()` depuis `process()`.
 
-`SelfTest` ne lit toujours aucun pot (rien à paramétrer dans un instrument de
-preuve) — mais l'infrastructure est prête pour le premier instrument dérivé
-qui en aura besoin.
-
-### 4.3 MPR121 — stub
+### 4.4 MPR121 — stub
 
 Interface définie mais non implémentée (`controls_mpr121_init/update/
 touched` retournent des valeurs par défaut). Le point de conception
 important, déjà posé même si le hardware n'est pas branché : **le polling
 MPR121 doit se faire depuis le main loop, jamais depuis l'IRQ DMA**, parce
 que les transactions I2C sont bloquantes et dureraient bien plus que le
-budget de 5,3 ms. `main.cpp` a déjà la boucle qui appelle
-`controls_mpr121_update()` à 100 Hz (`sleep_ms(10)`), en attente de
-l'implémentation réelle. `controls_mpr121_touched()` renvoie un `uint16_t`
-mis à jour de façon atomique (lecture safe même si appelée depuis l'IRQ una
-fois l'implémentation faite, car un accès aligné 16 bits sur Cortex-M est
-atomique sans lock).
+budget de 5,3 ms. `controls_mpr121_update()` est appelée depuis
+`controls_update()` (donc déjà au bon endroit, à 50 Hz) en attente de
+l'implémentation réelle — il n'y a plus de boucle 100 Hz séparée comme
+avant, tout est unifié dans le même scan (§4.1). `controls_mpr121_touched()`
+renvoie un `uint16_t` mis à jour de façon atomique (lecture safe même si
+appelée depuis l'IRQ une fois l'implémentation faite, car un accès aligné
+16 bits sur Cortex-M est atomique sans lock).
 
 ---
 
@@ -474,8 +512,9 @@ Reprises du contrat IRQ documenté dans `audio_instrument.hpp` et
   d'instrument sont des membres statiques dimensionnés à la compilation
   (voir `SelfTest::lut_`, taille fixe `LUT_SIZE`) ;
 - pas de `printf`, pas de `sleep_ms`, pas de mutex bloquant ;
-- lecture des pots : uniquement via `controls_pot_get()` (cache lissé, O(1),
-  pas d'accès ADC — voir §4.2) ; jamais `controls_pot_read_raw()`/`_norm()` ;
+- lecture des pots/boutons : uniquement via `controls_pot_get()`/
+  `controls_button_get()` (cache, O(1), pas d'accès matériel — voir §4) ;
+  jamais `controls_pot_read_raw()`/`_norm()` ;
 - lecture MPR121 : accès atomique du bitmask, OK en lecture seule.
 
 Rien dans le code n'impose ces contraintes par construction (pas de
@@ -760,8 +799,9 @@ touchant à l'un de ces points.
 | SRAM | Instrument dérivé bufferisant de l'audio : rester sous ~520 KiB total | overflow SRAM / crash |
 | PIO sync | Démarrer TX+RX via `pio_enable_sm_mask_in_sync`, jamais séparément | dérive RX/TX de quelques cycles |
 | MPR121 | Jamais d'appel I2C depuis l'IRQ DMA (bloquant) | callback audio dépasse son budget temps |
-| Perf | Code du chemin chaud (`dma_irq_handler`, `controls_update`, lectures ADC pots) doit rester `__not_in_flash_func` | latence/jitter variable (cache miss flash XIP) |
-| Contrôles | Ne jamais appeler `controls_pot_read_raw`/`_norm` depuis `process()` — utiliser `controls_pot_get()` | zipper noise (bruit ADC brut), discipline control-rate cassée |
+| Perf | Code du chemin chaud (`dma_irq_handler`) doit rester `__not_in_flash_func` — `controls_update()` n'en fait **plus** partie (§4.1) | latence/jitter variable (cache miss flash XIP) |
+| Contrôles | Ne jamais appeler `controls_pot_read_raw`/`_norm` depuis `process()` — utiliser `controls_pot_get()`/`controls_button_get()` | zipper noise (bruit ADC brut) / rebond, discipline control-rate cassée |
+| Contrôles | Fronts boutons et deltas encodeurs : un seul lecteur (le `process()`) | événements perdus/dupliqués si deux contextes les consomment |
 
 ---
 
@@ -779,7 +819,11 @@ dérivés du template plutôt que le template lui-même :
   en suivant le squelette `SelfTest` (§6.3).
 - **MPR121** — implémentation réelle du stub (`controls_mpr121_init/
   update`), lecture des registres `ELE0_ELE7`/`ELE8_ELEPROX`, seuils
-  touch/release. Contrainte déjà posée : polling main loop uniquement.
+  touch/release. Contrainte déjà posée : appelée depuis `controls_update()`
+  (main loop, ~50 Hz) uniquement — jamais depuis l'IRQ DMA.
+- **Board RP2350B** — fait : `boards/lucibox.h` (flash à confirmer, 4 Mo par défaut).
+- **WS2812** — fait : `hal/leds.c/.h`, GPIO 1, 16 LED, PIO1 ; framebuffer écrit
+  par `process()`, poussé par `main()` à 50 Hz.
 - **Switch instrument à chaud** — hors périmètre du modèle template
   (§7.1) ; voir §7.3 pour les prérequis architecturaux si un projet dérivé
   en a vraiment besoin.
