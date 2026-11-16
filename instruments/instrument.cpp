@@ -51,8 +51,12 @@ void Instrument::on_button(uint8_t idx, bool pressed) {
     if (idx >= CONTROLS_BTN_TOUCH(0))
         printf("[Instrument] tactile %u %s\n", idx - CONTROLS_BTN_TOUCH(0),
                pressed ? "pressed" : "released");
+    else if (idx >= CONTROLS_BTN_LIT(0))
+        printf("BOUTON_LED %d : GPIO %d %s\n", controls_button_gpio(idx),
+               controls_button_gpio(idx), pressed ? "pressed" : "released");
     else
-        printf("[Instrument] button %u %s\n", idx, pressed ? "pressed" : "released");
+        printf("BOUTON %d : GPIO %d %s\n", controls_button_gpio(idx),
+               controls_button_gpio(idx), pressed ? "pressed" : "released");
 
     /* Lit buttons (indices 6..9): toggle their LED on press. */
     if (pressed && idx >= CONTROLS_BTN_LIT(0) &&

@@ -84,6 +84,15 @@ uint16_t controls_pot_read_raw(uint8_t ch);
 /* Debounced level: true while held. Out of range -> false. */
 bool controls_button_get(uint8_t idx);
 
+/* Touch capacitif (CY8CMBR3116) : 0 = désactivé temporairement (ni init, ni
+ * poll, ni logs [TOUCH]) pour tester les boutons GPIO seuls. */
+#ifndef CONTROLS_TOUCH_ENABLED
+#define CONTROLS_TOUCH_ENABLED 0
+#endif
+
+/* GPIO d'un bouton (indices 0..9), ou -1 pour un pad tactile. */
+int controls_button_gpio(uint8_t idx);
+
 /* Edge events: true ONCE per press / release (multiple unread events are
  * returned one per call, none lost up to 255 pending). Poll every block. */
 bool controls_button_pressed(uint8_t idx);

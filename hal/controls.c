@@ -139,6 +139,9 @@ static void leds_init_(void) {
         gpio_init(LED_PINS[n]);
         gpio_set_dir(LED_PINS[n], GPIO_OUT);
         gpio_put(LED_PINS[n], 0);
+        /* Garde-fou : LED sans résistance dédiée possible → limite l'étage de
+         * sortie à 2 mA (≠ vraie limitation de courant, mais protège en pratique). */
+        gpio_set_drive_strength(LED_PINS[n], GPIO_DRIVE_STRENGTH_2MA);
     }
 }
 
@@ -229,7 +232,9 @@ void controls_init(void) {
     buttons_init_();
     leds_init_();
     encoders_init_();
+#if CONTROLS_TOUCH_ENABLED
     touch_init();   /* I2C bus must already be up; false = absent, pads stay released */
+#endif
 
     /* Bring-up dump: catches unplugged/floating pots and stuck buttons. */
     printf("[CONTROLS] pot raw (0..4095):");
@@ -277,6 +282,7 @@ void controls_update(void) {
 
     /* Touch pads: the chip debounces, so its state is already clean. Edges are
      * derived here (the single writer of the press/release counters). */
+#if CONTROLS_TOUCH_ENABLED
     if (touch_poll()) {
         static uint16_t touch_prev = 0;
         uint16_t now = touch_state();
@@ -291,4 +297,9 @@ void controls_update(void) {
         }
         touch_prev = now;
     }
+#endif
+}
+
+int controls_button_gpio(uint8_t idx) {
+    return idx < CONTROLS_NUM_BUTTONS_GPIO ? (int)BUTTON_PINS[idx] : -1;
 }
