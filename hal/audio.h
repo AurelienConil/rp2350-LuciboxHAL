@@ -8,7 +8,7 @@
  * The callback is called from the DMA IRQ at the end of every buffer.
  *
  * Fixed parameters:
- *   Sample rate : AUDIO_SAMPLE_RATE (48000 Hz)
+ *   Sample rate : AUDIO_SAMPLE_RATE (48828 Hz = MCLK 12.5 MHz / 256)
  *   Bit depth   : AUDIO_BIT_DEPTH   (16 bits/channel)
  *   Wire format : I2S Philips, 2 slots/frame (fixed by the ES8311 and
  *                 i2s_duplex.pio — see CLAUDE.md "Pièges connus", do not change)
@@ -30,6 +30,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -37,8 +38,12 @@ extern "C" {
 #endif
 
 /* ── Audio parameters (compile-time configurable) ────────────────────────── */
+/* 48828 Hz et non 48000 : le guide ES8311 (§8.5) exige que MCLK/LRCK soit un
+ * multiple de 16 (256, 272...). MCLK = 12.5 MHz (PWM 150/12) -> 12.5e6/256 =
+ * 48828.125 Hz => rapport exactement 256, et clkdiv PIO = 150e6/(48828*64) = 48.0
+ * (entier). Avec 48000 le rapport valait 260.4 (invalide : l'ADC délirait). */
 #ifndef AUDIO_SAMPLE_RATE
-#define AUDIO_SAMPLE_RATE   48000
+#define AUDIO_SAMPLE_RATE   48828
 #endif
 
 #ifndef AUDIO_BIT_DEPTH
@@ -127,6 +132,18 @@ void audio_hal_start(void);
  * Call AFTER es8311_init() to respect the EMI/I2C constraint.
  */
 void mclk_init(void);
+
+/* DEBUG ADC : crêtes brutes des slots I2S L et R (0..32768) depuis le dernier
+ * appel (remises à 0), et OR de tous les mots reçus. */
+void audio_debug_rx_peaks(int32_t *peak_l, int32_t *peak_r, uint32_t *or_all);
+
+/* DEBUG ADC : copie les 8 premiers mots I2S bruts [L:16][R:16] du dernier buffer. */
+void audio_debug_rx_words(uint32_t out[8]);
+
+/* DEBUG : durée max du callback, intervalle max entre IRQ (µs), flags de calage
+ * FIFO PIO (sticky, effacés à la lecture). Valeurs remises à 0 à chaque appel. */
+void audio_debug_timing(uint32_t *proc_us_max, uint32_t *irq_dt_max,
+                        bool *tx_stall, bool *rx_stall);
 
 #ifdef __cplusplus
 }

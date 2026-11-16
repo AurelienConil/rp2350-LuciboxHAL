@@ -322,7 +322,7 @@ S'applique au DAC (REG 0x04) ET à l'ADC (REG 0x03).
 
 ### ES8311 CLK1 (REG 0x01) — ANACLKDAC_ON
 bit 0 = 1 OBLIGATOIRE. Sans lui, le DAC analogique est silencieux.
-Valeur correcte : 0x35.
+Valeur correcte : 0x3F (0x35 = DAC seul : sans CLKADC_ON = bit 3 (ES8311 User Guide §8.5), l'ADC n'est pas cadencé et sort des zéros exacts).
 
 ### ⚠️ HYPOTHÈSE NON VALIDÉE — "EMI MCLK sur I2C"
 **Ceci est une supposition, pas un fait établi.** Aucun test EMI n'a jamais

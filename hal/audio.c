@@ -63,6 +63,21 @@ static inline int32_t pack_mono_tx(int16_t s) {
 #endif
 }
 
+/* DEBUG : crêtes brutes L/R (avant extraction du slot mono) */
+static volatile int32_t  dbg_peak_l = 0, dbg_peak_r = 0;
+static volatile uint32_t dbg_or_all = 0;
+static volatile uint32_t dbg_words[8];
+static volatile uint32_t dbg_proc_us_max = 0, dbg_irq_dt_max = 0;
+
+void audio_debug_rx_words(uint32_t out[8]) {
+    for (int i = 0; i < 8; i++) out[i] = dbg_words[i];
+}
+
+void audio_debug_rx_peaks(int32_t *peak_l, int32_t *peak_r, uint32_t *or_all) {
+    *peak_l = dbg_peak_l; *peak_r = dbg_peak_r; *or_all = dbg_or_all;
+    dbg_peak_l = 0; dbg_peak_r = 0; dbg_or_all = 0;
+}
+
 /* ── State ────────────────────────────────────────────────────────────────── */
 static int           dma_ch_tx = -1;
 static int           dma_ch_rx = -1;
@@ -72,6 +87,20 @@ static void             *g_ctx       = NULL;
 static PIO   g_pio = pio0;
 static uint  g_sm_tx = 0;
 static uint  g_sm_rx = 1;
+
+/* DEBUG : durée max du callback et intervalle max entre IRQ (µs), + flags sticky
+ * PIO de calage FIFO (TX vide = horloges coupées, RX plein = données perdues). */
+void audio_debug_timing(uint32_t *proc_us_max, uint32_t *irq_dt_max,
+                        bool *tx_stall, bool *rx_stall) {
+    *proc_us_max = dbg_proc_us_max;  dbg_proc_us_max = 0;
+    *irq_dt_max  = dbg_irq_dt_max;   dbg_irq_dt_max  = 0;
+    uint32_t f = g_pio->fdebug;
+    uint32_t mtx = 1u << (PIO_FDEBUG_TXSTALL_LSB + g_sm_tx);
+    uint32_t mrx = 1u << (PIO_FDEBUG_RXSTALL_LSB + g_sm_rx);
+    *tx_stall = (f & mtx) != 0;
+    *rx_stall = (f & mrx) != 0;
+    g_pio->fdebug = mtx | mrx;   /* sticky : écrire 1 pour effacer */
+}
 
 /* ── DMA TX IRQ — ping-pong ────────────────────────────────────────────────
  *
@@ -87,6 +116,11 @@ static uint  g_sm_rx = 1;
 static void __isr __not_in_flash_func(dma_irq_handler)(void) {
     /* Only acknowledge the TX channel (RX is restarted here without its own IRQ) */
     dma_hw->ints0 = (1u << dma_ch_tx);
+
+    uint32_t t_irq = time_us_32();
+    static uint32_t t_prev = 0;
+    if (t_prev) { uint32_t dt = t_irq - t_prev; if (dt > dbg_irq_dt_max) dbg_irq_dt_max = dt; }
+    t_prev = t_irq;
 
     int just_done = active_buf;
     active_buf    = 1 - active_buf;   /* switch to the pre-filled buffer */
@@ -105,10 +139,25 @@ static void __isr __not_in_flash_func(dma_irq_handler)(void) {
 
     /* Callback: stereo I2S frame -> mono -> instrument -> mono -> stereo I2S frame */
     if (g_process_fn) {
-        for (uint32_t i = 0; i < AUDIO_BUFFER_FRAMES; i++)
-            mono_rx_buf[i] = unpack_mono_rx(rx_buf[just_done][i]);
+        int32_t pl = dbg_peak_l, pr = dbg_peak_r;
+        uint32_t o = dbg_or_all;
+        for (uint32_t i = 0; i < AUDIO_BUFFER_FRAMES; i++) {
+            int32_t w = rx_buf[just_done][i];
+            int32_t l = (int16_t)(w >> 16), r = (int16_t)(w & 0xFFFF);
+            if (l < 0) l = -l;
+            if (r < 0) r = -r;
+            if (l > pl) pl = l;
+            if (r > pr) pr = r;
+            o |= (uint32_t)w;
+            mono_rx_buf[i] = unpack_mono_rx(w);
+        }
+        dbg_peak_l = pl; dbg_peak_r = pr; dbg_or_all = o;
+        for (int k = 0; k < 8; k++) dbg_words[k] = (uint32_t)rx_buf[just_done][k];
 
+        uint32_t t0 = time_us_32();
         g_process_fn(mono_rx_buf, mono_tx_buf, AUDIO_BUFFER_FRAMES, g_ctx);
+        uint32_t dp = time_us_32() - t0;
+        if (dp > dbg_proc_us_max) dbg_proc_us_max = dp;
 
         for (uint32_t i = 0; i < AUDIO_BUFFER_FRAMES; i++)
             tx_buf[just_done][i] = pack_mono_tx(mono_tx_buf[i]);

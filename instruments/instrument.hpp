@@ -38,6 +38,16 @@ public:
     const char *name() const override { return "Instrument (selftest)"; }
 
 private:
+    /* Mixage réglable à l'oreille (control -> audio), en dixièmes de dB :
+     *   encodeur 1 = niveau du sweep, encodeur 2 = niveau de la voix (micro).
+     * Valeurs de départ ci-dessous ; l'instrument affiche les valeurs finales. */
+    static constexpr int32_t MIX_STEP_DB10     = 15;     /* 1.5 dB par cran */
+    static constexpr int32_t SWEEP_DB10_INIT   = -365;   /* -36.5 dB ~ x0.015 (réglé à l'oreille) */
+    static constexpr int32_t VOICE_DB10_INIT   = 0;      /* 0 dB */
+    uint8_t tpa_code_ = 0x14;   /* gain TPA courant (contexte control uniquement), réglable au clavier e/d */
+    std::atomic<int32_t> sweep_db10_{SWEEP_DB10_INIT};
+    std::atomic<int32_t> voice_db10_{VOICE_DB10_INIT};
+
     /* Control -> audio: pitch offset in Hz, written by on_encoder(), read once
      * per buffer by process(). Atomic 32-bit = lock-free on Cortex-M33. */
     static constexpr int32_t PITCH_STEP_HZ = 5;
@@ -52,13 +62,29 @@ private:
     static constexpr float   SWEEP_CENTER_HZ    = (SWEEP_FREQ_LOW_HZ + SWEEP_FREQ_HIGH_HZ) / 2.0f;
     static constexpr float   SWEEP_AMPLITUDE_HZ = (SWEEP_FREQ_HIGH_HZ - SWEEP_FREQ_LOW_HZ) / 2.0f;
 
-    /* Sweep/passthrough mix gains — sum < 1.0 to leave headroom before clamping */
-    static constexpr float   SWEEP_GAIN       = 0.5f;
-    static constexpr float   PASSTHROUGH_GAIN = 0.5f;
     /* Niveau de sortie global (0..1) appliqué au mix : 0.5 = -6 dB. */
-    static constexpr float   MASTER_GAIN      = 0.5f;
+    static constexpr float   MASTER_GAIN      = 1.0f;   /* TEST sinus. Avant : 0.5 */
 
-    int16_t  lut_[LUT_SIZE];         /* precomputed sine table, amplitude 1.0 */
+    /* TEMPORAIRE (debug micro) : false = pas de sweep, seulement le micro. */
+    static constexpr bool    SWEEP_ENABLED = false;   /* micro seul */
+
+    /* Audio -> control : niveau micro du dernier buffer (crête, 0..32768) */
+    std::atomic<int32_t> mic_peak_{0};
+    std::atomic<int32_t> mic_peak_hold_{0};   /* max depuis le dernier log */
+    std::atomic<int32_t> out_peak_hold_{0};   /* debug : crête de sortie (avant clamp) */
+    std::atomic<uint32_t> clip_hold_{0};      /* debug : échantillons hors plage int16 (saturés par la conversion) */
+    std::atomic<int32_t> mic_min_{0}, mic_max_{0}, mic_mean_{0};  /* debug : dernier buffer */
+
+    /* Passe-haut logiciel sur l'entrée micro : Butterworth 4e ordre (24 dB/octave)
+     * = 2 biquads en cascade. Coupe le grave (plosives B/P, souffle, dérive DC)
+     * que le casque ne restitue pas mais qui monopolise la dynamique.
+     * Plus HPF_HZ est haut, plus la voix est fine : 120..250 Hz. */
+    static constexpr bool    HPF_ENABLED = true;   /* false = signal ADC strictement brut */
+    static constexpr float   HPF_HZ = 100.0f;
+    struct Biquad { float b0, b1, b2, a1, a2, x1, x2, y1, y2; };   /* initialisé dans init() */
+    Biquad hpf_[2];
+
+    int16_t  lut_[LUT_SIZE];        /* precomputed sine table, amplitude 1.0 */
     uint32_t phase_acc_   = 0;       /* 32-bit phase accumulator (sweep) */
     uint32_t phase_inc_   = 0;       /* current phase increment (sweep) */
     float    sweep_phase_     = 0.0f;  /* frequency LFO phase, radians [0..2π[ */

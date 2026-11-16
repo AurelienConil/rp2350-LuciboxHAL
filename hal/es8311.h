@@ -38,7 +38,7 @@ extern "C" {
 #define ES8311_REG_PDN_DAC    0x12  /* power-down DAC + reference */
 #define ES8311_REG_HPSW       0x13  /* HP switch (NS4150B on the WeAct board) */
 #define ES8311_REG_ADC_ANA    0x14  /* ADC/MIC: DMIC_ON, LINSEL, PGAGAIN */
-#define ES8311_REG_MIC_GAIN   0x16  /* mic PGA gain: bits[4:2] = 0..8 (0..+24dB) */
+#define ES8311_REG_MIC_GAIN   0x16  /* ADC_SCALE bits[2:0] : 0..7 = 0..+42 dB par 6 dB (défaut 4 = +24 dB) */
 #define ES8311_REG_ADC_VOL    0x17  /* ADC digital volume */
 #define ES8311_REG_ADC_CTRL   0x1C  /* ADC enable/mute */
 #define ES8311_REG_ADC_LEVEL  0x21  /* ADC peak meter (read-only) */
@@ -71,10 +71,23 @@ void es8311_power_up(void);
 void es8311_set_dac_volume(float vol_db);
 
 /*
- * es8311_set_mic_gain() — mic PGA gain.
- * gain: 0..8 -> 0..+24 dB in 3 dB steps.
+ * es8311_set_mic_gain() — gain du PGA analogique (REG 0x14 bits[3:0]).
+ * gain: 0..10 -> 0..+30 dB par pas de 3 dB.
  */
 void es8311_set_mic_gain(uint8_t gain);
+
+/* Gain PGA initial (0..10, pas de 3 dB). 0 = 0 dB : source niveau ligne/téléphone
+ * (ex. SmartRig) dont on règle le gain sur l'appareil. Micro nu : 6..10. */
+/* Gain numérique ADC_SCALE initial (0..7 = 0..+42 dB par 6 dB, nominal du guide = 4).
+ * 4 = nominal du guide (§10.6, tous ses exemples de config). Avec 0 le signal
+ * d'un SmartRig réglé bas tombait à ~-40 dBFS. */
+#ifndef ES8311_ADC_SCALE_INIT
+#define ES8311_ADC_SCALE_INIT 3   /* -6 dB vs nominal : micro sensible, SmartRig déjà au mini (pics à 98% sinon) */
+#endif
+
+#ifndef ES8311_PGA_GAIN_INIT
+#define ES8311_PGA_GAIN_INIT  0
+#endif
 
 #ifdef __cplusplus
 }

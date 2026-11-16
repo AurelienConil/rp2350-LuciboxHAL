@@ -42,7 +42,7 @@ extern "C" {
 /* Default power-up volume code. Chain: ES8311 DAC (0 dB) -> TPA -> headphones,
  * which is very loud. 0x05 = -43.9 dB; override with -DTPA_VOLUME=0x.. */
 #ifndef TPA_VOLUME
-#define TPA_VOLUME        0x05
+#define TPA_VOLUME        0x14   /* TEST drastique : -6.1 dB (gain porté par le TPA, numérique à 0 dB) */
 #endif
 
 typedef enum {

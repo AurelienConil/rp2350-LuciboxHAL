@@ -47,8 +47,11 @@ bool es8311_init(void) {
 
     /* ── Clocks ──────────────────────────────────────────────────────────────
      *
-     * REG 0x01 CLK1: 0x35 = {MCLK_ON(5), BCLK_ON(4), CLKDAC_ON(2), ANACLKDAC_ON(0)}
-     *   bit 0 ANACLKDAC_ON = 1 is CRITICAL: without it, the analog DAC is silent.
+     * REG 0x01 CLK1 (User Guide §8.3/8.5) : bit5 MCLK_ON, bit4 BCLK_ON,
+     *   bit3 CLKADC_ON, bit2 CLKDAC_ON. Bits 1:0 non documentés dans le guide
+     *   (bit 0 = ANACLKDAC_ON d'après le driver Espressif : sans lui DAC muet).
+     *   0x35 = DAC seul (CLKADC_ON=0 -> ADC non cadencé -> sort des zéros exacts).
+     *   0x3F = tout activé (valeur du driver de référence).
      *
      * REG 0x02 CLK2: MCLK/Fs ratio = 256 -> 0x04
      *   Our MCLK = 12.5 MHz, Fs = 48 kHz -> ratio 260.4 ≈ 256 (acceptable)
@@ -59,7 +62,7 @@ bool es8311_init(void) {
      * REG 0x04 CLK4: DAC OSR = 0x10 (minimum valid value)
      *   ⚠ Values 0x00..0x0F = total silence — confirmed bug from rp2350-BasicSine
      */
-    es_wr(ES8311_REG_CLK1, 0x35);
+    es_wr(ES8311_REG_CLK1, 0x3F);  /* 0x35 + CLKADC_ON (bit 3) : sans lui l'ADC sort 0 */
     es_wr(ES8311_REG_CLK2, 0x04);
     es_wr(ES8311_REG_CLK3, 0x10);  /* ADC OSR */
     es_wr(ES8311_REG_CLK4, 0x10);  /* DAC OSR */
@@ -88,7 +91,9 @@ bool es8311_init(void) {
      *   Required for the ADC to work (PGA = input pre-amp)
      */
     es_wr(ES8311_REG_SYS1, 0x06);
-    es_wr(ES8311_REG_SYS2, 0x00);
+    es_wr(ES8311_REG_SYS2, 0x02);   /* ref Espressif : 0x02 (était 0x00) */
+    es_wr(0x10, 0x1F);              /* ref Espressif : bias analogiques (SYSTEM_REG10) */
+    es_wr(0x11, 0x7F);              /* ref Espressif : (SYSTEM_REG11) */
 
     /* ── DAC ─────────────────────────────────────────────────────────────────
      *
@@ -123,14 +128,23 @@ bool es8311_init(void) {
      *
      * REG 0x1C ADC_CTRL: 0x00 = ADC enabled, no mute
      */
-    es_wr(ES8311_REG_ADC_ANA,  0x10);   /* LINE input enabled */
-    es_wr(ES8311_REG_MIC_GAIN, 0x08);   /* PGA +6 dB */
-    es_wr(ES8311_REG_ADC_CTRL, 0x00);   /* ADC active */
+    /* Micro analogique MIC1P/MIC1N (config du driver de référence Espressif) :
+     *   0x14 = 0x10 | ES8311_PGA_GAIN_INIT : LINSEL=1 (MIC1P/N) + PGA (0 dB par défaut,
+     *         source ligne/SmartRig ; max 10 = +30 dB pour un micro nu)
+     *   0x16 = 0x04 : ADC_SCALE=4 = +24 dB (défaut du guide §10.6 ; bit 3 = ADC_RAMCLR, laissé à 0)
+     *   0x17 = 0xBF : ADC_VOL 0 dB — ⚠ défaut 0x00 = -95.5 dB = ADC muet !
+     *   0x1C = 0x6A : ADC_EQ_BYPASS + filtre passe-haut DC */
+    es_wr(ES8311_REG_ADC_ANA,  0x10 | (ES8311_PGA_GAIN_INIT & 0x0F));
+    es_wr(ES8311_REG_MIC_GAIN, ES8311_ADC_SCALE_INIT & 0x07);
+    es_wr(ES8311_REG_ADC_VOL,  0xBF);
+    es_wr(0x1B, 0x0A);              /* ADC HPF (ref Espressif) */
+    es_wr(ES8311_REG_ADC_CTRL, 0x6A);
 
     /* Read-back for diagnostics */
-    printf("[ES8311] REG0x01=0x%02X (expected 0x35)\n", es_rd(ES8311_REG_CLK1));
+    printf("[ES8311] REG0x01=0x%02X (expected 0x3F)\n", es_rd(ES8311_REG_CLK1));
     printf("[ES8311] REG0x0D=0x%02X (expected 0x06)\n", es_rd(ES8311_REG_SYS1));
     printf("[ES8311] REG0x32=0x%02X (DAC vol)\n",        es_rd(ES8311_REG_DAC_VOL));
+    printf("[ES8311] REG0x17=0x%02X (ADC vol, expected 0xBF)\n", es_rd(ES8311_REG_ADC_VOL));
     printf("[ES8311] REG0x1C=0x%02X (ADC ctrl)\n",       es_rd(ES8311_REG_ADC_CTRL));
     printf("[ES8311] Registers ok (CSM_ON not active yet)\n");
 
@@ -150,6 +164,13 @@ void es8311_power_up(void) {
     uint8_t csm  = (flag >> 4) & 0x07;
     printf("[ES8311] CSM = S%d (0x%02X) %s\n",
            csm, flag, csm == 7 ? "-> OK" : "-> ERROR: MCLK absent or wrong ratio?");
+
+    /* DEBUG ADC : dump des registres utiles après power-up */
+    static const uint8_t regs[] = {0x00,0x01,0x02,0x03,0x0A,0x0D,0x0E,0x10,0x11,0x14,0x15,0x16,0x17,0x1B,0x1C,0x44};
+    printf("[ES8311] dump:");
+    for (unsigned i = 0; i < sizeof regs; i++)
+        printf(" %02X=%02X", regs[i], es_rd(regs[i]));
+    printf("\n");
 }
 
 /* ── Runtime controls ────────────────────────────────────────────────────── */
@@ -163,8 +184,8 @@ void es8311_set_dac_volume(float vol_db) {
 }
 
 void es8311_set_mic_gain(uint8_t gain) {
-    if (gain > 8) gain = 8;
-    uint8_t cur = es_rd(ES8311_REG_MIC_GAIN);
-    cur = (cur & 0xE3u) | ((gain & 0x07u) << 2u);  /* bits[4:2] */
-    es_wr(ES8311_REG_MIC_GAIN, cur);
+    if (gain > 10) gain = 10;
+    uint8_t cur = es_rd(ES8311_REG_ADC_ANA);
+    cur = (cur & 0xF0u) | gain;                     /* PGAGAIN = bits[3:0] */
+    es_wr(ES8311_REG_ADC_ANA, cur);
 }
