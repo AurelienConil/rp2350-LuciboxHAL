@@ -3,7 +3,7 @@
  *
  * One bus for every I2C chip of the PCB:
  *   ES8311        0x18  codec (hal/es8311.c)
- *   TPA6130A2     0x60  headphone amplifier (no driver yet: presence probe only;
+ *   TPA6130A2     0x60  headphone amplifier (hal/tpa6130a2.c;
  *                       answers only while its SD pin is high)
  *   CY8CMBR3116   0x37  capacitive touch controller (hal/touch.c)
  *

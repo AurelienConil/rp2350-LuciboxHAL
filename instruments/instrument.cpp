@@ -46,7 +46,13 @@ void Instrument::update_sweep_() {
 /* ── CONTROL side (main loop, ~50 Hz) ─────────────────────────────────────── */
 
 void Instrument::on_button(uint8_t idx, bool pressed) {
-    printf("[Instrument] button %u %s\n", idx, pressed ? "pressed" : "released");
+    /* Indices 10..25 = pads tactiles (CONTROLS_BTN_TOUCH) : affichés "tactile n"
+     * avec n = numéro de pad 0..15 (= CSn = bit n de BUTTON_STAT). */
+    if (idx >= CONTROLS_BTN_TOUCH(0))
+        printf("[Instrument] tactile %u %s\n", idx - CONTROLS_BTN_TOUCH(0),
+               pressed ? "pressed" : "released");
+    else
+        printf("[Instrument] button %u %s\n", idx, pressed ? "pressed" : "released");
 
     /* Lit buttons (indices 6..9): toggle their LED on press. */
     if (pressed && idx >= CONTROLS_BTN_LIT(0) &&

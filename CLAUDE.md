@@ -227,11 +227,14 @@ importance). Ordre et ce qu'il faut y voir :
    (pads court-circuités, CMOD), niveau de repos de l'IRQ (GPIO 6), puis un log à
    chaque changement de pads avec compteur d'IRQ.
 4. `[CONTROLS]` : valeurs brutes des 8 pots, niveaux des boutons/encodeurs au boot.
-5. `[TPA]` : ampli casque TPA6130A2. Au reset il est désactivé et muté
-   (REG1=0x00, REG2=0xC0) : `main.cpp` (`tpa_diag_and_unmute()`) active L+R et
-   règle le volume `TPA_VOLUME` (code 0..63, courbe NON linéaire, table
-   `TPA_VOLUME_DB`, datasheet SLOS488F Table 2 : 0x08 = -36.5 dB). Pas de vrai
-   driver ; sa broche SD doit être à 1.
+5. `[TPA]` : ampli casque TPA6130A2, driver `hal/tpa6130a2.h/.c` (`tpa_init()`
+   appelé dans `main.cpp`). Au reset il est désactivé et muté (REG1=0x00,
+   REG2=0xC0) : le driver lit la version (REG4, attendu 0x2), règle le volume
+   `TPA_VOLUME` (code 0..63, courbe NON linéaire, datasheet SLOS488F Table 2 :
+   0x08 = -36.5 dB) tout en restant muté, active L+R puis démute (sans pop).
+   API : `tpa_set_volume()/_db()`, `tpa_mute()`, `tpa_shutdown()`,
+   `tpa_set_mode()`, `tpa_set_hiz()`, `tpa_thermal_fault()`, `tpa_dump()`.
+   REG5..8 (tests TI) jamais écrits. Sa broche SD doit être à 1.
 6. `BRING-UP SUMMARY` : une ligne par composant.
 
 ---
@@ -247,6 +250,7 @@ rp2350-LuciboxHAL/
 │   ├── audio.h/.c                  # MCLK PWM, PIO I2S duplex, DMA double-buffer
 │   ├── es8311.h/.c                 # Driver codec ES8311 (DAC + ADC)
 │   └── controls.h/.c               # pots, boutons, LEDs, encodeurs, pads tactiles
+│   ├── tpa6130a2.h/.c              # driver ampli casque TPA6130A2 (I2C 0x60)
 │   ├── touch.h/.c                  # driver CY8CMBR3116 (16 pads, I2C 0x37, IRQ GPIO 6)
 │   └── i2c_bus.h                   # bus I2C partagé (I2C0, GPIO 16/17)
 └── instruments/
@@ -307,7 +311,7 @@ Symptôme : `error: uses VFP register arguments`.
 
 ### Niveau de sortie casque
 Chaîne : DAC ES8311 (0 dB) → TPA6130A2 → casque. Très fort par défaut. Réglages :
-`TPA_VOLUME` dans `main.cpp` (0x08 = -36.5 dB) et `Instrument::MASTER_GAIN` (0.5).
+`TPA_VOLUME` (`hal/tpa6130a2.h`, ou `-DTPA_VOLUME=0x..`) (0x08 = -36.5 dB) et `Instrument::MASTER_GAIN` (0.5).
 
 ### ES8311 OSR (registres 0x03 et 0x04)
 Valeurs 0x00..0x0F = **silence total**. Minimum valide = **0x10**.
@@ -362,6 +366,11 @@ drapeau, la lecture I2C se fait dans `controls_update()`).
 - Le capteur NACK la 1re transaction après sommeil : toutes les lectures/écritures
   retentent jusqu'à l'ACK (~2 ms d'écart). Boot du capteur jusqu'à ~900 ms.
 - Pad n = CSn = bit n de `BUTTON_STAT` (0xAA) → bouton `CONTROLS_BTN_TOUCH(n)`.
+- Numérotation : pads 0..15 (`tactile 0` = 1er capteur CS0, `tactile 2` = 3e).
+  Indice de bouton dans l'API = 10 + n (`controls_button_get(12)` = `tactile 2`).
+  Le log `[Instrument]` affiche `tactile n` (n = numéro de pad, = bit n du
+  `[TOUCH] pads 0x....`) pour les pads, et `button N` (0..9) pour les simples/lumineux.
+  Les encodeurs (GPIO 18..25) n'ont pas d'indice de bouton (hook `on_encoder()`).
 - ⚠ Matériel : le pad CS6 (pin 18) sert aussi de reset au boot, il ne doit pas
   être à la masse à la mise sous tension.
 Ne pas appeler depuis IRQ DMA — I2C est bloquant. Utiliser le main loop.

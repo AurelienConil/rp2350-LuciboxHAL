@@ -44,6 +44,7 @@ add_executable(rp2350-LuciboxHAL
     hal/leds.c
     hal/touch.c
     hal/i2c_bus.c
+    hal/tpa6130a2.c
     instruments/instrument.cpp
 )
 
