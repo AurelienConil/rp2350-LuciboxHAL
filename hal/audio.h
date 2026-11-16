@@ -71,7 +71,7 @@ extern "C" {
 /* ── I2S pinout ───────────────────────────────────────────────────────────── */
 #define AUDIO_PIN_BCLK    10  /* I2S bit clock  (PIO side-set bit 0) */
 #define AUDIO_PIN_LRCK    11  /* I2S word select (PIO side-set bit 1, = BCLK+1) */
-#define AUDIO_PIN_DACDAT  12  /* I2S TX: data RP2350 -> ES8311 DI */
+#define AUDIO_PIN_DACDAT  9   /* I2S TX: data RP2350 -> ES8311 DSDIN (PCB: GPIO 9, hors du groupe BCLK/LRCK) */
 #define AUDIO_PIN_ADCDAT  13  /* I2S RX: data ES8311 DO -> RP2350 */
 #define AUDIO_PIN_MCLK    14  /* ES8311 master clock (12.5 MHz PWM) */
 

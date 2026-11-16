@@ -81,11 +81,12 @@ vit dans `process()` (compteur d'échantillons), pas dans `on_tick()` (jitter
 
 | GPIO | Signal | Interface |
 |------|--------|-----------|
-| 6 | SDA | I2C1 → ES8311 config |
-| 7 | SCL | I2C1 → ES8311 config |
+| 16 | SDA | I2C0 (bus partagé, `hal/i2c_bus.h`) → ES8311, TPA6130A2, CY8CMBR3116 |
+| 17 | SCL | I2C0 (bus partagé) |
+| 6 | HI (IRQ tactile) | entrée, CY8CMBR3116 pin 23 (HI/BUZ/GPO7), actif bas |
 | 10 | BCLK | I2S bit clock (PIO0 SM0 side-set bit 0) |
 | 11 | LRCK | I2S word select (PIO0 SM0 side-set bit 1, = BCLK+1) |
-| 12 | DACDAT | I2S TX : RP2350 → ES8311 DI |
+| 9 | DACDAT | I2S TX : RP2350 → ES8311 DSDIN (hors du groupe BCLK/LRCK : `out pins` est indépendant du side-set) |
 | 13 | ADCDAT | I2S RX : ES8311 DO → RP2350 |
 | 14 | MCLK | PWM 12.5 MHz (150 MHz / 12) |
 | 18-25 | Encodeur 0-3 | 4 encodeurs quadrature (A,B par paire : 18/19, 20/21, 22/23, 24/25), sans push — décodés par timer 1 kHz |
@@ -104,12 +105,12 @@ ES8311 ADC → ADCDAT (GPIO13) → PIO0 SM1 → DMA RX → rx_buf[]
                                                          ↓
                                                   audio_cb() → instrument.process()
                                                          ↓
-tx_buf[] → DMA TX → PIO0 SM0 → DACDAT (GPIO12) → ES8311 DAC
+tx_buf[] → DMA TX → PIO0 SM0 → DACDAT (GPIO9) → ES8311 DAC
 ```
 
 ### Ordre d'init (CRITIQUE)
 
-1. **I2C** — avant MCLK (ordre conservé par précaution ; la cause "EMI" n'est qu'une hypothèse non testée — voir §Pièges connus)
+1. **I2C** (I2C0, GPIO 16/17) — avant MCLK (ordre conservé par précaution ; la cause "EMI" n'est qu'une hypothèse non testée — voir §Pièges connus)
 2. **ES8311 registres** — DAC + ADC, sans CSM_ON
 3. **Controls** — pots (ADC GPIO 40-47), boutons, LEDs, encodeurs (timer 1 kHz)
 4. **HAL audio** — PIO + DMA (non démarrés)
@@ -177,10 +178,10 @@ audio (voir §"Lecture des capteurs" ci-dessous) — donc pas besoin de
 
 ### Lecture des capteurs (control rate, hors IRQ audio)
 
-Pots, boutons et (à terme) capteurs capacitifs I2C sont scannés depuis une
+Pots, boutons et capteurs capacitifs I2C (CY8CMBR3116) sont scannés depuis une
 **seule tâche dans la boucle `main()`**, à `CONTROLS_UPDATE_PERIOD_MS` (~50 Hz,
 `hal/controls.h`) — **jamais** depuis l'IRQ audio. C'est ce découplage qui rend
-sûr d'y inclure demain de l'I2C bloquant (MPR121) à côté des pots : l'IRQ audio
+sûr d'y faire de l'I2C bloquant (touch) à côté des pots : l'IRQ audio
 ne touche plus jamais un capteur, quel qu'il soit.
 
 Les instruments ne doivent **jamais** appeler `controls_pot_read_raw()` /
@@ -188,8 +189,9 @@ Les instruments ne doivent **jamais** appeler `controls_pot_read_raw()` /
 vraie conversion ADC, non filtrée, à chaque appel. À la place :
 
 - `controls_update()` scanne pots (`CONTROLS_NUM_POTS = 8`), boutons
-  (`CONTROLS_NUM_BUTTONS = 10` : 6 simples + 4 lumineux, indices
-  `CONTROLS_BTN_SIMPLE(n)` / `CONTROLS_BTN_LIT(n)`) et MPR121. Appelée
+  (`CONTROLS_NUM_BUTTONS = 26` : 6 simples + 4 lumineux + 16 pads tactiles,
+  indices `CONTROLS_BTN_SIMPLE(n)` / `CONTROLS_BTN_LIT(n)` /
+  `CONTROLS_BTN_TOUCH(n)`). Appelée
   **automatiquement à chaque tick de `main()`**, jamais par l'instrument.
   Brochage : tables en tête de `hal/controls.c`.
 - Encodeurs (4) : décodés par un timer répétitif 1 kHz (un scan 50 Hz perdrait
@@ -212,6 +214,28 @@ vraie conversion ADC, non filtrée, à chaque appel. À la place :
 
 ---
 
+## Bring-up (premier flash d'un PCB) — lire la console USB
+
+Le firmware est volontairement bavard au boot (console série USB, 115200 sans
+importance). Ordre et ce qu'il faut y voir :
+1. `[I2C]` : niveaux de repos de SDA/SCL (doivent valoir 1/1), récupération de
+   bus si SDA bloqué, puis **scan 0x08..0x77** avec tableau ES8311 (0x18) /
+   TPA6130A2 (0x60) / CY8CMBR3116 (0x37) : `found` ou `MISSING` + piste de câblage.
+2. `[ES8311]` : ID puce. Absent = **non fatal** (le firmware continue sans audio
+   pour pouvoir tester le reste).
+3. `[TOUCH]` : famille/ID, (re)configuration éventuelle, auto-test du capteur
+   (pads court-circuités, CMOD), niveau de repos de l'IRQ (GPIO 6), puis un log à
+   chaque changement de pads avec compteur d'IRQ.
+4. `[CONTROLS]` : valeurs brutes des 8 pots, niveaux des boutons/encodeurs au boot.
+5. `[TPA]` : ampli casque TPA6130A2. Au reset il est désactivé et muté
+   (REG1=0x00, REG2=0xC0) : `main.cpp` (`tpa_diag_and_unmute()`) active L+R et
+   règle le volume `TPA_VOLUME` (code 0..63, courbe NON linéaire, table
+   `TPA_VOLUME_DB`, datasheet SLOS488F Table 2 : 0x08 = -36.5 dB). Pas de vrai
+   driver ; sa broche SD doit être à 1.
+6. `BRING-UP SUMMARY` : une ligne par composant.
+
+---
+
 ## Structure des fichiers
 
 ```
@@ -222,7 +246,9 @@ rp2350-LuciboxHAL/
 ├── hal/
 │   ├── audio.h/.c                  # MCLK PWM, PIO I2S duplex, DMA double-buffer
 │   ├── es8311.h/.c                 # Driver codec ES8311 (DAC + ADC)
-│   └── controls.h/.c               # pots, boutons, LEDs, encodeurs + MPR121 stub
+│   └── controls.h/.c               # pots, boutons, LEDs, encodeurs, pads tactiles
+│   ├── touch.h/.c                  # driver CY8CMBR3116 (16 pads, I2C 0x37, IRQ GPIO 6)
+│   └── i2c_bus.h                   # bus I2C partagé (I2C0, GPIO 16/17)
 └── instruments/
     ├── audio_instrument.hpp        # Classe de base : process() audio + hooks contrôle
     └── instrument.hpp/.cpp         # Instrument (à réécrire) ; fourni = fake : sweep DAC + passthrough ADC
@@ -269,11 +295,19 @@ Le PCB utilise les GPIO 32-47 : la cible est un **RP2350B** (80 broches).
 au lieu de `pico2`. ⚠ `PICO_FLASH_SIZE_BYTES` y est copié de pico2 (4 Mo) — à
 régler sur la flash réelle. Après ce changement, **reconfigurer CMake**
 (supprimer `build/` ou "CMake: Delete Cache and Reconfigure").
+⚠ Piège vécu : avec un cache resté sur `PICO_BOARD=pico2`, `NUM_BANK0_GPIOS=30` et
+tout GPIO ≥ 32 est faux (`gpio_get` renvoie 0 : boutons lumineux « appuyés » au
+boot, pots ADC figés). Vérifier `PICO_BOARD:STRING=lucibox` dans
+`build/CMakeCache.txt`.
 
 ### ABI float
 Ne **JAMAIS** ajouter `-mfloat-abi=hard` ni `-mfpu=...` dans `target_compile_options`.
 Cause ABI mismatch au link avec les libs SDK softfp.
 Symptôme : `error: uses VFP register arguments`.
+
+### Niveau de sortie casque
+Chaîne : DAC ES8311 (0 dB) → TPA6130A2 → casque. Très fort par défaut. Réglages :
+`TPA_VOLUME` dans `main.cpp` (0x08 = -36.5 dB) et `Instrument::MASTER_GAIN` (0.5).
 
 ### ES8311 OSR (registres 0x03 et 0x04)
 Valeurs 0x00..0x0F = **silence total**. Minimum valide = **0x10**.
@@ -316,6 +350,18 @@ qui bufferise de l'audio (looper, sampler avec RAM scratch, etc.).
 Le SM RX (SM1) partage le même `clkdiv` que SM TX (SM0).
 Démarrer avec `pio_enable_sm_mask_in_sync((1<<SM_TX)|(1<<SM_RX))` — c'est ce que `audio_hal_start()` fait.
 
-### MPR121
-Addr I2C 0x5A, bus I2C1 (partagé avec ES8311 addr 0x18) → compatible.
+### CY8CMBR3116 (touch, `hal/touch.c`)
+Addr I2C 0x37, bus I2C0 partagé (ES8311 0x18). IRQ = broche `HI` du capteur →
+GPIO 6 (front descendant, impulsion 200–700 µs : l'ISR ne fait que lever un
+drapeau, la lecture I2C se fait dans `controls_update()`).
+- Config d'usine ≠ ce PCB : seuls CS0..7 actifs, `HI` sur la pin 9, pin 23 =
+  GPO7. `touch_init()` écrit `SENSOR_EN=0xFFFF` et `SPO_CFG=0x14` (SPO1=CS15,
+  SPO0=HI sur pin 23) **une seule fois** (lit d'abord ; ne touche la flash du
+  capteur — 100 k cycles — que si la config diffère), CRC calculé par le capteur
+  (`CTRL_CMD 3`), sauvegarde (`CTRL_CMD 2`, ~220 ms), reset (`CTRL_CMD 255`).
+- Le capteur NACK la 1re transaction après sommeil : toutes les lectures/écritures
+  retentent jusqu'à l'ACK (~2 ms d'écart). Boot du capteur jusqu'à ~900 ms.
+- Pad n = CSn = bit n de `BUTTON_STAT` (0xAA) → bouton `CONTROLS_BTN_TOUCH(n)`.
+- ⚠ Matériel : le pad CS6 (pin 18) sert aussi de reset au boot, il ne doit pas
+  être à la masse à la mise sous tension.
 Ne pas appeler depuis IRQ DMA — I2C est bloquant. Utiliser le main loop.

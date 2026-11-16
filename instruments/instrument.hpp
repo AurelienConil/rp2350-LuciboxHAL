@@ -55,6 +55,8 @@ private:
     /* Sweep/passthrough mix gains — sum < 1.0 to leave headroom before clamping */
     static constexpr float   SWEEP_GAIN       = 0.5f;
     static constexpr float   PASSTHROUGH_GAIN = 0.5f;
+    /* Niveau de sortie global (0..1) appliqué au mix : 0.5 = -6 dB. */
+    static constexpr float   MASTER_GAIN      = 0.5f;
 
     int16_t  lut_[LUT_SIZE];         /* precomputed sine table, amplitude 1.0 */
     uint32_t phase_acc_   = 0;       /* 32-bit phase accumulator (sweep) */

@@ -5,7 +5,7 @@
  *   6 simple buttons  : GPIO 26-31, pull-up, active-low
  *   4 lit buttons     : GPIO 32/34/36/38 (switch) + 33/35/37/39 (LED)
  *   4 encoders        : GPIO 18-25 (A,B pairs), no push switch
- *   MPR121 (stub)     : I2C1 addr 0x5A
+ *   16 touch pads     : CY8CMBR3116 on I2C0 (addr 0x37), IRQ on GPIO 6 — hal/touch.h
  *
  * (The WS2812 strip is an output, not a control: it is not handled here.)
  *
@@ -21,7 +21,7 @@
  *
  * Scanning is decoupled from the audio IRQ:
  *   - controls_update()   : main() loop, every CONTROLS_UPDATE_PERIOD_MS
- *                           (pots, buttons, MPR121 — I2C blocking is OK there)
+ *                           (pots, buttons, touch pads — I2C blocking is OK there)
  *   - encoder decoder     : 1 kHz repeating timer started by controls_init()
  *                           (50 Hz would lose steps). Reads 8 GPIOs, nothing
  *                           blocking.
@@ -64,17 +64,22 @@ uint16_t controls_pot_read_raw(uint8_t ch);
 
 /* ── Buttons ─────────────────────────────────────────────────────────────────
  * One index space, 0..CONTROLS_NUM_BUTTONS-1:
- *   0..5  simple buttons (GPIO 26..31)           -> CONTROLS_BTN_SIMPLE(n)
- *   6..9  lit buttons    (GPIO 32,34,36,38)      -> CONTROLS_BTN_LIT(n)
- * Software-debounced (CONTROLS_BUTTON_DEBOUNCE_SAMPLES consecutive reads).
- * Polarity is hidden: true == pressed. */
+ *   0..5   simple buttons (GPIO 26..31)          -> CONTROLS_BTN_SIMPLE(n)
+ *   6..9   lit buttons    (GPIO 32,34,36,38)     -> CONTROLS_BTN_LIT(n)
+ *   10..25 capacitive touch pads CS0..CS15       -> CONTROLS_BTN_TOUCH(n)
+ *          (CY8CMBR3116, I2C; debounced by the chip itself)
+ * GPIO buttons are software-debounced (CONTROLS_BUTTON_DEBOUNCE_SAMPLES
+ * consecutive reads). Polarity is hidden: true == pressed / touched. */
 
 #define CONTROLS_NUM_BUTTONS_SIMPLE  6
 #define CONTROLS_NUM_BUTTONS_LIT     4
-#define CONTROLS_NUM_BUTTONS  (CONTROLS_NUM_BUTTONS_SIMPLE + CONTROLS_NUM_BUTTONS_LIT)
+#define CONTROLS_NUM_BUTTONS_TOUCH   16
+#define CONTROLS_NUM_BUTTONS_GPIO    (CONTROLS_NUM_BUTTONS_SIMPLE + CONTROLS_NUM_BUTTONS_LIT)
+#define CONTROLS_NUM_BUTTONS  (CONTROLS_NUM_BUTTONS_GPIO + CONTROLS_NUM_BUTTONS_TOUCH)
 
 #define CONTROLS_BTN_SIMPLE(n)  (n)
 #define CONTROLS_BTN_LIT(n)     (CONTROLS_NUM_BUTTONS_SIMPLE + (n))
+#define CONTROLS_BTN_TOUCH(n)   (CONTROLS_NUM_BUTTONS_GPIO + (n))
 
 /* Debounced level: true while held. Out of range -> false. */
 bool controls_button_get(uint8_t idx);
@@ -106,19 +111,9 @@ int32_t controls_encoder_position(uint8_t idx);
 
 /* ── Scan ───────────────────────────────────────────────────────────────────── */
 
-/* Scans pots + buttons + MPR121 once. Called by main() every
+/* Scans pots + buttons + touch pads once. Called by main() every
  * CONTROLS_UPDATE_PERIOD_MS. NEVER from the audio IRQ, never by instruments. */
 void controls_update(void);
-
-/* ── MPR121 (12-pad capacitive touch, I2C1 addr 0x5A) — STUB ─────────────────
- * Shares I2C1 with the ES8311. Blocking I2C: only reachable via
- * controls_update(). */
-#define CONTROLS_MPR121_I2C_ADDR  0x5A
-#define CONTROLS_MPR121_NUM_PADS  12
-
-bool     controls_mpr121_init(void);     /* false if absent; call after es8311_init() */
-void     controls_mpr121_update(void);   /* called by controls_update() */
-uint16_t controls_mpr121_touched(void);  /* 12-bit mask, safe from IRQ */
 
 #ifdef __cplusplus
 }

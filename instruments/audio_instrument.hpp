@@ -76,7 +76,8 @@ public:
 
     /*
      * on_button() — CONTROL context. A debounced edge, once per event.
-     * idx     : 0..CONTROLS_NUM_BUTTONS-1 (CONTROLS_BTN_SIMPLE(n) / CONTROLS_BTN_LIT(n))
+     * idx     : 0..CONTROLS_NUM_BUTTONS-1 (CONTROLS_BTN_SIMPLE(n) / CONTROLS_BTN_LIT(n) /
+     *            CONTROLS_BTN_TOUCH(n))
      * pressed : true = press, false = release
      * Within one control tick, all presses are delivered before all releases
      * (the relative order of a press and a release of the same tick is lost).

@@ -49,7 +49,8 @@ void Instrument::on_button(uint8_t idx, bool pressed) {
     printf("[Instrument] button %u %s\n", idx, pressed ? "pressed" : "released");
 
     /* Lit buttons (indices 6..9): toggle their LED on press. */
-    if (pressed && idx >= CONTROLS_BTN_LIT(0) && idx < CONTROLS_NUM_BUTTONS) {
+    if (pressed && idx >= CONTROLS_BTN_LIT(0) &&
+        idx < CONTROLS_BTN_LIT(0) + CONTROLS_NUM_BUTTONS_LIT) {
         uint8_t led = idx - CONTROLS_BTN_LIT(0);
         controls_led_set(led, !controls_led_get(led));
     }
@@ -80,7 +81,7 @@ void Instrument::process(const int16_t *rx, int16_t *tx, uint32_t n_frames) {
         float   pass  = (float)rx[i] * PASSTHROUGH_GAIN;
 
         /* Mix + int16 clamp */
-        float mix = sweep + pass;
+        float mix = (sweep + pass) * MASTER_GAIN;
         if (mix > 32767.0f)  mix = 32767.0f;
         if (mix < -32768.0f) mix = -32768.0f;
         tx[i] = (int16_t)mix;

@@ -1,5 +1,5 @@
 /*
- * hal/controls.c — Pots, buttons, lit-button LEDs, encoders, MPR121 (stub)
+ * hal/controls.c — Pots, buttons, lit-button LEDs, encoders, touch pads
  * See controls.h for the API contract and pinout.
  */
 
@@ -10,6 +10,7 @@
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
 #include "controls.h"
+#include "touch.h"
 
 /* ── Pinout (Lucibox PCB) ─────────────────────────────────────────────────── */
 
@@ -18,7 +19,7 @@
 #define CONTROLS_ADC_BASE_PIN  40
 
 /* Button index -> GPIO. 0..5 simple, 6..9 lit. */
-static const uint8_t BUTTON_PINS[CONTROLS_NUM_BUTTONS] = {
+static const uint8_t BUTTON_PINS[CONTROLS_NUM_BUTTONS_GPIO] = {
     26, 27, 28, 29, 30, 31,     /* simple (assumed contiguous D26..D31) */
     32, 34, 36, 38              /* lit: switch pins */
 };
@@ -106,13 +107,14 @@ bool controls_button_released(uint8_t idx) {
 }
 
 static void buttons_init_(void) {
-    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS; i++) {
+    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS_GPIO; i++) {
         gpio_init(BUTTON_PINS[i]);
         gpio_set_dir(BUTTON_PINS[i], GPIO_IN);
         gpio_pull_up(BUTTON_PINS[i]);
     }
+    sleep_ms(10);  /* laisser le pull-up charger l'éventuel RC du PCB avant la 1re lecture */
     /* Prime with an immediate reading: no phantom press event at boot. */
-    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS; i++) {
+    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS_GPIO; i++) {
         bool pressed = !gpio_get(BUTTON_PINS[i]);  /* active-low */
         button_filter[i].candidate = pressed;
         button_filter[i].count     = CONTROLS_BUTTON_DEBOUNCE_SAMPLES;
@@ -227,12 +229,25 @@ void controls_init(void) {
     buttons_init_();
     leds_init_();
     encoders_init_();
+    touch_init();   /* I2C bus must already be up; false = absent, pads stay released */
 
-    printf("[CONTROLS] %d pots (GPIO %d..%d), %d buttons (%d simple + %d lit), "
+    /* Bring-up dump: catches unplugged/floating pots and stuck buttons. */
+    printf("[CONTROLS] pot raw (0..4095):");
+    for (int ch = 0; ch < CONTROLS_NUM_POTS; ch++) printf(" A%d=%u", ch, controls_pot_read_raw(ch));
+    printf("\n[CONTROLS] button levels at boot (1 = released, pull-up):");
+    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS_GPIO; i++)
+        printf(" b%u(GPIO%u)=%d", i, BUTTON_PINS[i], gpio_get(BUTTON_PINS[i]));
+    printf("\n[CONTROLS] encoder pins (A,B) at boot:");
+    for (uint8_t i = 0; i < CONTROLS_NUM_ENCODERS; i++)
+        printf(" e%u=%d%d", i, gpio_get(ENCODER_PINS[i][0]), gpio_get(ENCODER_PINS[i][1]));
+    printf("\n");
+
+    printf("[CONTROLS] %d pots (GPIO %d..%d), %d buttons (%d simple + %d lit + %d touch), "
            "%d LEDs, %d encoders\n",
            CONTROLS_NUM_POTS, CONTROLS_ADC_BASE_PIN,
            CONTROLS_ADC_BASE_PIN + CONTROLS_NUM_POTS - 1,
            CONTROLS_NUM_BUTTONS, CONTROLS_NUM_BUTTONS_SIMPLE, CONTROLS_NUM_BUTTONS_LIT,
+           CONTROLS_NUM_BUTTONS_TOUCH,
            CONTROLS_NUM_LEDS, CONTROLS_NUM_ENCODERS);
 }
 
@@ -244,7 +259,7 @@ void controls_update(void) {
         pot_smoothed[ch] += pot_smooth_coeff * (raw - pot_smoothed[ch]);
     }
 
-    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS; i++) {
+    for (uint8_t i = 0; i < CONTROLS_NUM_BUTTONS_GPIO; i++) {
         bool raw_pressed = !gpio_get(BUTTON_PINS[i]);  /* active-low */
         button_filter_t *f = &button_filter[i];
         if (raw_pressed == f->candidate) {
@@ -260,24 +275,20 @@ void controls_update(void) {
         }
     }
 
-    controls_mpr121_update();  /* blocking I2C: fine here */
-}
-
-/* ── MPR121 — STUB ────────────────────────────────────────────────────────── */
-
-static volatile uint16_t mpr121_state = 0;
-
-bool controls_mpr121_init(void) {
-    /* TODO: presence check, thresholds, ELE_CFG run mode. */
-    printf("[MPR121] Stub — not implemented (addr 0x5A on I2C1)\n");
-    return false;
-}
-
-void controls_mpr121_update(void) {
-    /* TODO: read ELE0_ELE7 (0x00) / ELE8_ELEPROX (0x01) on i2c1, addr 0x5A. */
-    (void)mpr121_state;
-}
-
-uint16_t controls_mpr121_touched(void) {
-    return mpr121_state;
+    /* Touch pads: the chip debounces, so its state is already clean. Edges are
+     * derived here (the single writer of the press/release counters). */
+    if (touch_poll()) {
+        static uint16_t touch_prev = 0;
+        uint16_t now = touch_state();
+        uint16_t changed = now ^ touch_prev;
+        for (uint8_t n = 0; n < CONTROLS_NUM_BUTTONS_TOUCH; n++) {
+            if (!(changed & (1u << n))) continue;
+            uint8_t idx = CONTROLS_BTN_TOUCH(n);
+            bool down = (now >> n) & 1u;
+            button_debounced[idx] = down;
+            if (down) press_count[idx]   = press_count[idx] + 1;
+            else      release_count[idx] = release_count[idx] + 1;
+        }
+        touch_prev = now;
+    }
 }

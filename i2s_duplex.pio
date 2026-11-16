@@ -9,7 +9,7 @@
 ; One DMA word = one 32-bit stereo frame: [L:16][R:16]
 ;
 ; Pinout:
-;   TX out pin    = DACDAT  (GPIO 12)
+;   TX out pin    = DACDAT  (GPIO 9, independent of the side-set pins)
 ;   TX side bit 0 = BCLK    (GPIO 10)
 ;   TX side bit 1 = LRCK    (GPIO 11  = BCLK+1, hardware constraint)
 ;   RX in  pin    = ADCDAT  (GPIO 13)

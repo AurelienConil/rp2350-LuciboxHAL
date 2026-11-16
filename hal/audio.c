@@ -99,7 +99,7 @@ static void __isr __not_in_flash_func(dma_irq_handler)(void) {
     dma_channel_set_write_addr (dma_ch_rx, rx_buf[active_buf], false);
     dma_channel_set_trans_count(dma_ch_rx, AUDIO_BUFFER_FRAMES, true);
 
-    /* Sensors (pots, buttons, MPR121) are scanned from main()'s loop at
+    /* Sensors (pots, buttons, touch pads) are scanned from main()'s loop at
      * ~50 Hz, not here — see hal/controls.h. The audio IRQ never touches a
      * sensor; the instrument only ever reads the cache via controls_*_get(). */
 

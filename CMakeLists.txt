@@ -42,6 +42,8 @@ add_executable(rp2350-LuciboxHAL
     hal/es8311.c
     hal/controls.c
     hal/leds.c
+    hal/touch.c
+    hal/i2c_bus.c
     instruments/instrument.cpp
 )
 

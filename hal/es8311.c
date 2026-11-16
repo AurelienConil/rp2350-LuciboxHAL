@@ -9,9 +9,10 @@
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include "es8311.h"
+#include "i2c_bus.h"
 
-/* I2C instance used (must match the config in main.cpp) */
-#define ES8311_I2C  i2c1
+/* I2C instance used: the board's shared bus (hal/i2c_bus.h) */
+#define ES8311_I2C  LUCIBOX_I2C
 
 /* ── Low-level I2C helpers ────────────────────────────────────────────────── */
 
