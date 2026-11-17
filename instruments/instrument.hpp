@@ -25,6 +25,7 @@
 #pragma once
 
 #include "audio_instrument.hpp"
+#include "../hal/tpa6130a2.h"
 #include <atomic>
 #include <cstdint>
 
@@ -44,7 +45,7 @@ private:
     static constexpr int32_t MIX_STEP_DB10     = 15;     /* 1.5 dB par cran */
     static constexpr int32_t SWEEP_DB10_INIT   = -365;   /* -36.5 dB ~ x0.015 (réglé à l'oreille) */
     static constexpr int32_t VOICE_DB10_INIT   = 0;      /* 0 dB */
-    uint8_t tpa_code_ = 0x14;   /* gain TPA courant (contexte control uniquement), réglable au clavier e/d */
+    uint8_t tpa_code_ = TPA_VOLUME;   /* gain TPA courant (contexte control uniquement), réglable au clavier e/d */
     std::atomic<int32_t> sweep_db10_{SWEEP_DB10_INIT};
     std::atomic<int32_t> voice_db10_{VOICE_DB10_INIT};
 

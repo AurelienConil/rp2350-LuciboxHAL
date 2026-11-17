@@ -122,7 +122,7 @@ tx_buf[] → DMA TX → PIO0 SM0 → DACDAT (GPIO9) → ES8311 DAC
 ### Callback audio
 
 ```c
-// Appelée depuis IRQ DMA toutes les ~5.3 ms (256 frames @ 48 kHz)
+// Appelée depuis IRQ DMA toutes les ~5.24 ms (256 frames @ 48828 Hz)
 // → instrument.process(rx_buf[just_done], tx_buf[just_done], 256)
 ```
 
@@ -261,17 +261,38 @@ rp2350-LuciboxHAL/
 
 ---
 
+## Flash 16 Mo + PSRAM 8 Mo — état et test mis de côté
+
+- **Flash : validée** sur le PCB (JEDEC `BA 40 18`, SFDP 128 Mbit = 16 Mo, erase/program/verify OK
+  sur les 5 fins de tranche). `boards/lucibox.h` : `PICO_FLASH_SIZE_BYTES` = 16 Mo.
+- **PSRAM : non utilisable en l'état.** Monté : APS6404L-**SQN**-SN = version **1,8 V** (VDD 1,62–1,98 V,
+  abs. max 2,45 V) alimentée en 3,3 V → hors spécification ; crash/déconnexion USB à la 1re lecture
+  (2026-11-17). À remplacer par **APS6404L-3SQR-SN** (3,3 V, même SOP-8, même brochage) + corriger la BOM.
+  Constats utiles : CS1 = GPIO 0, ID `0D 5D`, EID `4B 32 99 B5 83 10`, 8 Mo (64 Mbit).
+- Le test mémoire (`memtest.h/.c`) est **gardé de côté, non compilé**, dans `extras/memtest/`
+  (README : comment le réactiver). Rien de PSRAM/flash-test n'est dans le firmware.
+
+---
+
 ## Registres ES8311 clés
 
 Tous les registres de `rp2350-BasicSine` s'appliquent, plus :
 
 | Registre | Valeur | Raison |
 |----------|--------|--------|
+| 0x01 CLK1 | **0x3F** | bit 3 = `CLKADC_ON` (User Guide §8.5). 0x35 = DAC seul → ADC non cadencé → zéros exacts |
 | 0x03 CLK3 | 0x10 | ADC OSR min valide (mêmes contraintes que 0x04 DAC OSR) |
-| 0x0E SYS2 | 0x00 | Active PGA + modulateur ADC |
-| 0x14 ADC_ANA | 0x10 | LINSEL=1 : entrée ligne MIC1P/MIC1N activée |
-| 0x16 MIC_GAIN | 0x08 | bits[4:2]=010 : PGA +6 dB |
-| 0x1C ADC_CTRL | 0x00 | ADC activé (mode normal) |
+| 0x0E SYS2 | 0x02 | PGA (bit 6) + modulateur ADC (bit 5) activés (défaut guide = 0x6A = éteints) |
+| 0x14 ADC_ANA | 0x10 \| `ES8311_PGA_GAIN_INIT` | LINSEL=1 (MIC1P/MIC1N) ; PGAGAIN bits[3:0] = 0..10 → 0..+30 dB par 3 dB (défaut projet : 0 dB) |
+| 0x16 ADC_SCALE | `ES8311_ADC_SCALE_INIT` (3) | bits[2:0] : 0..7 = 0..+42 dB par 6 dB, **nominal du guide = 4** (+24 dB) ; projet : 3 (−6 dB) |
+| **0x17 ADC_VOL** | **0xBF** | ⚠ **défaut 0x00 = −95.5 dB = ADC muet.** À écrire obligatoirement (0xBF = 0 dB) |
+| 0x1C ADC_CTRL | 0x6A | EQ de l'ADC contourné + filtre passe-haut DC dynamique |
+| 0x1B | 0x0A | coefficient du HPF ADC (valeur du driver Espressif, **non documentée dans le guide**) |
+| 0x10, 0x11 | 0x1F, 0x7F | idem : valeurs du driver Espressif, **absentes du guide** (retirer en premier si doute) |
+
+Source de référence : **`ES8311.user.Guide.pdf` (Rev 1.11)** — contient la carte des
+registres (la datasheet courte `ES8311.PDF` Rev 5.0 ne l'a pas). Les valeurs marquées
+« Espressif » viennent du driver `esp-adf` / `esp_codec_dev`, de mémoire, non vérifiées.
 
 ---
 
@@ -310,8 +331,14 @@ Cause ABI mismatch au link avec les libs SDK softfp.
 Symptôme : `error: uses VFP register arguments`.
 
 ### Niveau de sortie casque
-Chaîne : DAC ES8311 (0 dB) → TPA6130A2 → casque. Très fort par défaut. Réglages :
-`TPA_VOLUME` (`hal/tpa6130a2.h`, ou `-DTPA_VOLUME=0x..`) (0x08 = -36.5 dB) et `Instrument::MASTER_GAIN` (0.5).
+Chaîne : DAC ES8311 (0 dB numérique, `DAC_VOL` = 0xBF) → TPA6130A2 → casque. Pleine échelle
+du DAC = AVDD/3.3 Vrms (~1 Vrms à 0 dBFS si AVDD = 3.3 V ; AVDD **non vérifié** sur ce PCB, ni le
+câblage OUTP/OUTN → entrées asymétriques du TPA). Réglages : `TPA_VOLUME` (`hal/tpa6130a2.h`,
+ou `-DTPA_VOLUME=0x..`), table `VOLUME_DB[]` dans `hal/tpa6130a2.c` (non linéaire) :
+0x05 = −43.9, 0x08 = −36.5, 0x10 = −24.7, 0x14 = −20.5 (**valeur actuelle**), 0x17 = −17.8,
+0x28 = −6.1, 0x35 = +0.1 dB (unité), 0x3F = +4.0 dB. Le gain maximal du TPA est donc +4 dB :
+il ne rattrape pas un signal d'entrée trop faible.
+⚠ Pleine échelle numérique + TPA haut = très fort au casque : monter par petits pas.
 
 ### ES8311 OSR (registres 0x03 et 0x04)
 Valeurs 0x00..0x0F = **silence total**. Minimum valide = **0x10**.
@@ -320,9 +347,16 @@ S'applique au DAC (REG 0x04) ET à l'ADC (REG 0x03).
 ### ES8311 SYS1 (REG 0x0D) — logique inversée
 `PDN_VREF bit2 = 1` = ACTIVÉ (pas désactivé). 0x06 = VREF actif. 0x0A = silence.
 
-### ES8311 CLK1 (REG 0x01) — ANACLKDAC_ON
-bit 0 = 1 OBLIGATOIRE. Sans lui, le DAC analogique est silencieux.
-Valeur correcte : 0x3F (0x35 = DAC seul : sans CLKADC_ON = bit 3 (ES8311 User Guide §8.5), l'ADC n'est pas cadencé et sort des zéros exacts).
+### ES8311 CLK1 (REG 0x01) — horloges DAC *et* ADC
+bit 0 (ANACLKDAC_ON, d'après le driver Espressif) = 1 OBLIGATOIRE : sans lui, le DAC analogique est silencieux.
+bit 3 = `CLKADC_ON` (User Guide §8.5) = 1 OBLIGATOIRE pour l'ADC : sans lui l'ADC sort des **zéros exacts**.
+Valeur correcte : **0x3F**. (L'ancien 0x35 était validé pour la sortie seule.)
+
+### ES8311 — rapport MCLK/LRCK : multiple de 16 (User Guide §8.5)
+MCLK = 12.5 MHz (PWM 150/12). À 48000 Hz, MCLK/Fs = **260.4**, rapport **invalide** pour l'ADC
+(attendu : 256, 272...). Symptôme : ADC qui délire (rafales à pleine échelle puis silence parfait,
+valeurs en multiples de 1024). Correctif : `AUDIO_SAMPLE_RATE = 48828` (`hal/audio.h`) →
+12.5e6/48828.125 = **256 exact**, `clkdiv` PIO = 48.0 (entier). Le sweep tombe alors à 440 Hz pile.
 
 ### ⚠️ HYPOTHÈSE NON VALIDÉE — "EMI MCLK sur I2C"
 **Ceci est une supposition, pas un fait établi.** Aucun test EMI n'a jamais
@@ -374,3 +408,84 @@ drapeau, la lecture I2C se fait dans `controls_update()`).
 - ⚠ Matériel : le pad CS6 (pin 18) sert aussi de reset au boot, il ne doit pas
   être à la masse à la mise sous tension.
 Ne pas appeler depuis IRQ DMA — I2C est bloquant. Utiliser le main loop.
+
+---
+
+## Journal — mise au point de l'entrée micro (branche `add-mic-input`)
+
+État au 2026-11-17. Voir aussi §« Registres ES8311 clés » et §« Pièges connus ».
+
+### Câblage et source
+- Mini-jack 4 pôles : pôle micro → **MIC1P** via un condensateur 1 µF ; **MIC1N** → AGND via 1 µF
+  (entrée asymétrique, couplée en AC ; l'ES8311 n'a **pas** de bias micro).
+- Source : préampli **SmartRig** (micro XLR → smartphone), gain réglé sur l'appareil (très bas).
+  Le guide ES8311 précise que l'entrée est une entrée micro différentielle, pleine échelle ≈ 1 Vrms
+  à PGA 0 dB, impédance d'entrée 6 kΩ, « pas recommandée pour une entrée ligne ».
+
+### Réglages ADC actuels (valeurs de départ, tous surchargeables par `-D...`)
+`ES8311_PGA_GAIN_INIT = 0` (0 dB), `ES8311_ADC_SCALE_INIT = 3` (−6 dB), `ADC_VOL = 0xBF`.
+Avec un micro sensible et le SmartRig au minimum, les plosives montent à 50–70 % de pleine échelle
+alors que la voix normale est à −40/−45 dBFS (**écart 40–50 dB**).
+
+### Bugs trouvés (dans l'ordre), tous liés à l'ADC
+1. `ADC_VOL` (REG 0x17) jamais écrit → défaut −95.5 dB.
+2. `CLKADC_ON` (REG 0x01 bit 3) absent → ADC non cadencé → `OR = 0` sur ADCDAT (la ligne était
+   pilotée à 0 par le codec ; un pull-up GPIO n'y changeait rien → le codec émettait des zéros).
+3. MCLK/Fs = 260.4 (invalide) → ADC erratique → `AUDIO_SAMPLE_RATE` passé à 48828.
+4. `es8311_set_mic_gain()` écrivait dans le mauvais registre (0x16 au lieu de 0x14[3:0]) : corrigé.
+5. Gains trop forts : PGA +30 dB + `ADC_SCALE` +24 dB saturaient l'ADC (tout à ±32768) avec une source
+   de niveau téléphone → PGA 0 dB.
+
+### Ce qui a été essayé et **ne doit pas être refait tel quel**
+- `irq_set_priority(DMA_IRQ_0, 0)` (priorité max de l'IRQ audio) : provoque un **énorme bruit de fond**
+  (confirmé sur le PCB). Cause non élucidée. Retiré.
+- Écrêtage dur de sortie à ±12000 (« protection des oreilles ») : crée des harmoniques audibles sur
+  une rafale de grave → « saturation » à chaque plosive. Retiré.
+- Limiteur sans anticipation : ne tient pas sur un front de plosive. Retiré.
+- Limiteur à anticipation (ligne à retard 96 échantillons, min glissant + moyenne glissante) livré
+  avec voix à +10.5 dB : l'utilisateur a rapporté qu'il « fait exploser le micro ». **Cause non
+  identifiée** (pas de bug évident à la relecture ; hypothèse : le gain voix +10.5 dB par défaut,
+  ajouté en même temps, a augmenté de ~10 dB le gain de la boucle micro → casque → micro = larsen).
+  Retiré. À refaire séparément, voix à 0 dB, casque éloigné des oreilles pour le premier test.
+- Gain numérique voix élevé (+10.5 dB) : les plosives (~20000) × 3.35 dépassent la pleine échelle
+  → saturation int16. Préférer le gain analogique (SmartRig, TPA) au gain numérique.
+
+### Observations sur les plosives
+Un B/P près du micro produit un front brutal puis une décroissance lente. Un passe-haut le laisse
+passer en grande partie (réponse à un échelon) : sortie ≈ 89 % de l'entrée avec un 4ᵉ ordre à 200 Hz.
+Un passe-haut (réglé ici à 100 Hz, 4ᵉ ordre, `HPF_HZ`/`HPF_ENABLED` dans `instrument.hpp`) aide pour
+le grave soutenu, pas pour l'attaque. Pistes : filtre anti-pop et micro hors axe (acoustique, le plus
+efficace) ; limiteur/compresseur **avec anticipation** (logiciel, à refaire) ; ALC matériel de
+l'ES8311 (REG 0x18/0x19, vitesse d'attaque inconnue).
+
+### Outils de debug TEMPORAIRES (à retirer avant de dériver le template)
+- `hal/audio.c/.h` : `audio_debug_rx_peaks()`, `audio_debug_rx_words()`, `audio_debug_timing()`
+  (crêtes L/R brutes, 8 mots I2S bruts, durée max du callback, intervalle max entre IRQ,
+  drapeaux sticky `TXSTALL`/`RXSTALL` du PIO) + chronométrage dans `dma_irq_handler`.
+- `instruments/instrument.cpp` : lignes console `[MIC]` / `[RAW]` / `[OUT]` toutes les 200 ms
+  (`min/max/mean` ADC, `int16-sat`).
+- `hal/es8311.c` : dump des registres (`[ES8311] dump:`) après `es8311_power_up()`.
+- Lecture des mots bruts : `[L:16][R:16]` ; L et R portent le même échantillon (`ADCDAT_SEL=0`),
+  avec un décalage d'un échantillon entre slots (sans conséquence en mono).
+- Valeurs de référence au repos : plancher ADC ≈ ±2 LSB (`ADC_SCALE` 4), ±16–250 selon gain/micro.
+  Un `OR=0x00000000` permanent = ADC non cadencé ; une crête collée à 32768 = ADC saturé.
+
+### Contrôles au clavier (console série USB, lus dans `Instrument::on_tick`)
+Pas de capteurs branchés sur la carte de test : le mixage se règle au clavier.
+`q`/`a` = niveau du sweep ±1.5 dB, `w`/`s` = niveau de la voix ±1.5 dB, `e`/`d` = gain TPA ±1 code
+(le firmware affiche les valeurs). Le mixage passe par `on_encoder(1|2, ±1)` (encodeurs 1 et 2 si
+branchés). Réglage « les deux s'entendent » trouvé : sweep −36.5 dB, voix +10.5 dB (soit un écart de
+47 dB entre le sweep audible et le niveau de la voix : confirme le signal micro faible).
+
+### État actuel de `Instrument` (≠ démo par défaut décrite plus haut)
+`SWEEP_ENABLED = false` (micro seul), `MASTER_GAIN = 1.0`, voix 0 dB, filtre passe-haut actif,
+`TPA_VOLUME = 0x14`. Aucun limiteur, aucun écrêtage volontaire (seule la conversion en `int16`
+sature, par sécurité). Remettre avant de figer le template : `SWEEP_ENABLED = true`, gains 0.5/0.5,
+`MASTER_GAIN = 0.5`, retirer le debug ci-dessus.
+
+### Reste à faire
+- Limiteur/compresseur à anticipation pour les plosives (cf. ci-dessus).
+- Vérifier AVDD de l'ES8311 et le câblage OUTP/OUTN → TPA6130A2.
+- Confirmer `0x10`/`0x11`/`0x1B` (valeurs Espressif non documentées dans le guide).
+- Le bring-up affiche `Touch (0x37): MISSING / init failed` alors que le scan I2C le trouve (non lié).
+- Retirer les outils de debug, remettre l'instrument par défaut, mettre à jour ce fichier.

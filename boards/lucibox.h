@@ -5,8 +5,8 @@
  * do not exist on the RP2350A of the stock "pico2" board.
  * Derived from the SDK's pico2.h; only the RP2350B flag differs.
  *
- * ⚠ PICO_FLASH_SIZE_BYTES is copied from pico2 (4 MB) — set it to the actual
- *   flash chip fitted on the PCB.
+ * PICO_FLASH_SIZE_BYTES = 16 MB (flash chip fitted on the PCB; to be confirmed
+ * by the [FLASH] JEDEC/SFDP log of hal/memtest.c).
  */
 #ifndef _BOARDS_LUCIBOX_H
 #define _BOARDS_LUCIBOX_H
@@ -21,9 +21,9 @@ pico_board_cmake_set(PICO_PLATFORM, rp2350)
 #define PICO_FLASH_SPI_CLKDIV 2
 #endif
 
-pico_board_cmake_set_default(PICO_FLASH_SIZE_BYTES, (4 * 1024 * 1024))
+pico_board_cmake_set_default(PICO_FLASH_SIZE_BYTES, (16 * 1024 * 1024))
 #ifndef PICO_FLASH_SIZE_BYTES
-#define PICO_FLASH_SIZE_BYTES (4 * 1024 * 1024)
+#define PICO_FLASH_SIZE_BYTES (16 * 1024 * 1024)
 #endif
 
 pico_board_cmake_set_default(PICO_RP2350_A2_SUPPORTED, 1)
